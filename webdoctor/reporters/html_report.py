@@ -153,6 +153,9 @@ def generate_html(report: TestReport) -> str:
     m = report.metrics
     ss_uri = _screenshot_data_uri(report.screenshot_path)
     ai_html = _md_to_html(report.ai_summary or "")
+    # Python 3.11 rejects backslashes inside f-string expressions (PEP 701 is
+    # 3.12+), so escape the embedded JSON outside the template literal.
+    report_data_json = json.dumps(report.to_dict(), default=str).replace("</", "<\\/")
 
     # Issue cards
     cards = []
@@ -337,7 +340,7 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
 </div>
 
 <script>
-const reportData = {json.dumps(report.to_dict(), default=str).replace("</", "<\\/")};
+const reportData = {report_data_json};
 function downloadJSON(){{
   const b=new Blob([JSON.stringify(reportData,null,2)],{{type:'application/json'}});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='webdoctor-report.json';a.click();

@@ -144,3 +144,15 @@ Each subsequent entry records: file(s), change and reason, exact verification co
 - Verification: live dashboard smoke on an OS-assigned loopback port with sentinel password/API key/session JSON: root + CSS + JS + models load, `cb_monkey` present in JS, one monkey-enabled diagnosis completes, progress contains no sentinels, `monkey_summary` reports seed 99 and 8/8 actions, and HTML/MD/JSON downloads contain the monkey suite/section.
 - Verification: `git status --short` reviewed — only intended source, test, doc and changelog files; no keys, sessions or generated reports in the repository. Added-line secret scan clean (only pre-existing `sk-secret` test fixtures remain).
 - Result: PASS. Commit and push were requested by the user after this entry was written; this log is included in that commit.
+
+## 2026-11-24 — GitHub Actions failure: Python 3.11 f-string syntax
+
+- User report: GitHub showed a failed check on PR #1 / branch `improvement/accuracy-pass`. Public Actions run `45435356480` failed at step 5 (`python -m pytest -q`) with exit code 2; the Node.js 20 annotation was only a warning.
+- Root cause: `webdoctor/reporters/html_report.py` embedded `json.dumps(...).replace("</", "<\\/")` directly inside an f-string expression. Backslashes inside f-string expressions require Python 3.12+ (PEP 701), but the workflow runs Python 3.11 and `pyproject.toml` declares `requires-python = ">=3.9"`. Local verification used Python 3.13, so it did not expose the incompatibility.
+- Files: `webdoctor/reporters/html_report.py`, `last changes`.
+- Change: precompute `report_data_json = json.dumps(report.to_dict(), default=str).replace("</", "<\\/")` before the HTML template and interpolate `{report_data_json}`. This preserves the `</script>` breakout protection while keeping the module parseable by Python 3.9–3.11. The partially applied inline substitution in the working tree was completed rather than overwritten.
+- Reason: the committed CI configuration must pass on the Python version it declares/uses; accuracy-first verification requires catching version-specific syntax failures before release.
+- Verification: `ast.parse(..., feature_version=(3, 11))` across all 38 project `.py` files — PASS (`python 3.11 grammar PASS`).
+- Verification: `python -m pytest -q` — 65 passed; `python tests/test_all.py` — 22 tests OK; `python -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only the Git LF→CRLF notice).
+- Verification: existing `tests/test_security_hardening.py::test_html_report_sanitizes_ai_markdown_and_embedded_json` still passes, confirming `<\\/script>` escaping remains intact.
+- Result: PASS. Fix committed and pushed to `origin/improvement/accuracy-pass`; GitHub Actions will be re-run by that push.
