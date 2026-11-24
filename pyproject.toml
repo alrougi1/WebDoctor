@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webdoctor"
+version = "1.0.0"
+description = "Automated website testing and root-cause diagnostics for developers"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "WebDoctor Team"}]
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "playwright>=1.40",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "jinja2>=3.1",
+    "markdown>=3.5",
+    "rich>=13.0",
+    "openai>=1.12",
+    "weasyprint>=60.0",
+]
+
+[project.scripts]
+webdoctor = "webdoctor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["webdoctor*"]

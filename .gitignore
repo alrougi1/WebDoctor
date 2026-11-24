@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*secrets*.json
+*session*.json
+storage_state.json
+
+# WebDoctor output (reports may contain private URLs, screenshots, and auth state)
+reports/
+*.log

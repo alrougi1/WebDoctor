@@ -1,0 +1,42 @@
+name: WebDoctor Site Health Check
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL to test"
+        required: true
+        default: "https://your-site.com"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install WebDoctor
+        run: |
+          pip install webdoctor
+          playwright install chromium
+
+      - name: Run diagnostics
+        run: |
+          webdoctor check "${{ github.event.inputs.url || 'https://your-site.com' }}" \
+            --full --no-ai --report-dir ./reports --ci
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webdoctor-report
+          path: ./reports/
