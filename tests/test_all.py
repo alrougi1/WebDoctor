@@ -19,6 +19,18 @@ from webdoctor.diagnostics.ai_engine import _multi_model_diagnosis, build_diagno
 from webdoctor.cli import build_parser, _parse_compare
 
 
+def _start_fixture_server(handler):
+    """Start a local HTTP fixture on an OS-assigned free port."""
+    class ReuseTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    httpd = ReuseTCPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+    return httpd, thread, base_url
+
+
 class TestModels(unittest.TestCase):
     def test_score_clean(self):
         r = TestReport(url="https://example.com").compute_summary()
@@ -133,10 +145,10 @@ class TestMultiAI(unittest.TestCase):
         ids = [m["id"] for m in models]
         self.assertIn("gpt-6-luna", ids)
         self.assertIn("gemini-3.8-flash", ids)
-        self.assertIn("claude-sonnet-4", ids)
+        self.assertIn("claude-sonnet-5-5", ids)
 
     def test_parse_compare(self):
-        res = _parse_compare("sandbox:gpt-6-luna,anthropic:claude-sonnet-4")
+        res = _parse_compare("sandbox:gpt-6-luna,anthropic:claude-sonnet-5-5")
         self.assertEqual(len(res), 2)
         self.assertEqual(res[0]["provider"], "sandbox")
 
@@ -144,7 +156,7 @@ class TestMultiAI(unittest.TestCase):
         prompt = "test prompt"
         models = [
             {"provider": "sandbox", "model": "gpt-6-luna", "label": "Model A"},
-            {"provider": "anthropic", "model": "claude-sonnet-4", "label": "Model B", "api_key": ""},
+            {"provider": "anthropic", "model": "claude-sonnet-5-5", "label": "Model B", "api_key": ""},
         ]
         out = _multi_model_diagnosis(prompt, models)
         self.assertIn("Consensus", out)
@@ -218,33 +230,29 @@ class TestFormLoginAgainstMockSite(unittest.TestCase):
                     self.end_headers()
                     self.wfile.write(b"<!doctype html><html><body><div role='alert'>invalid credentials</div></body></html>")
 
-        class ReuseTCPServer(socketserver.TCPServer):
-            allow_reuse_address = True
-
-        cls.httpd = ReuseTCPServer(("127.0.0.1", 8771), AuthHandler)
-        cls.t = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.t.start()
+        cls.httpd, cls.t, cls.base_url = _start_fixture_server(AuthHandler)
 
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def test_successful_form_login(self):
-        ok, res = perform_form_login("http://127.0.0.1:8771/login", "alice", "secret", headless=True)
+        ok, res = perform_form_login(self.base_url + "/login", "alice", "secret", headless=True)
         self.assertTrue(ok)
         self.assertIn("/dashboard", res.get("final_url", ""))
         self.assertTrue(len(res.get("cookies", [])) >= 1)
 
     def test_failed_form_login(self):
-        ok, res = perform_form_login("http://127.0.0.1:8771/login", "alice", "WRONG", headless=True)
+        ok, res = perform_form_login(self.base_url + "/login", "alice", "WRONG", headless=True)
         self.assertFalse(ok)
         self.assertIn("refused", res.get("error", ""))
 
     def test_authenticated_diagnostic_run(self):
         report = run_diagnostics(
-            "http://127.0.0.1:8771/dashboard",
+            self.base_url + "/dashboard",
             login=True,
-            login_url="http://127.0.0.1:8771/login",
+            login_url=self.base_url + "/login",
             username="alice",
             password="secret",
             browser_mode=True,
@@ -283,19 +291,15 @@ class TestControlledHealthySite(unittest.TestCase):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers(); self.wfile.write(body)
 
-        class ReuseTCPServer(socketserver.TCPServer):
-            allow_reuse_address = True
-
-        cls.httpd = ReuseTCPServer(("127.0.0.1", 8770), HealthyHandler)
-        cls.t = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.t.start()
+        cls.httpd, cls.t, cls.base_url = _start_fixture_server(HealthyHandler)
 
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def test_healthy_fixture_gets_good_score(self):
-        report = run_diagnostics("http://127.0.0.1:8770", browser_mode=True, check_links=False, ai=False)
+        report = run_diagnostics(self.base_url, browser_mode=True, check_links=False, ai=False)
         self.assertTrue(report.score >= 80, f"score was {report.score}")
         self.assertIn(report.overall_grade, ("A", "B"))
 
@@ -335,19 +339,15 @@ console.error("analytics init failure");
                     self.send_header("Content-Type", "text/plain")
                     self.end_headers(); self.wfile.write(b"Not Found")
 
-        class ReuseTCPServer(socketserver.TCPServer):
-            allow_reuse_address = True
-
-        cls.httpd = ReuseTCPServer(("127.0.0.1", 8769), DemoHandler)
-        cls.t = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.t.start()
+        cls.httpd, cls.t, cls.base_url = _start_fixture_server(DemoHandler)
 
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def test_broken_site_all_failure_modes(self):
-        report = run_diagnostics("http://127.0.0.1:8769", browser_mode=True, check_links=True, ai=False)
+        report = run_diagnostics(self.base_url, browser_mode=True, check_links=True, ai=False)
         self.assertEqual(report.overall_status, CheckStatus.FAILED)
         ids = {i.id: i for i in report.issues}
         self.assertTrue(any("JS_RUNTIME" in k for k in ids))
@@ -365,7 +365,7 @@ class TestCLIParser(unittest.TestCase):
         p = build_parser()
         args = p.parse_args(["check", "example.com", "--login", "--login-url", "https://x.com/login",
                              "--username", "alice", "--password", "secret",
-                             "--ai-provider", "anthropic", "--ai-model", "claude-sonnet-4"])
+                             "--ai-provider", "anthropic", "--ai-model", "claude-sonnet-5-5"])
         self.assertTrue(args.login)
         self.assertEqual(args.ai_provider, "anthropic")
 

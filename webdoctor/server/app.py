@@ -3,30 +3,107 @@ and run authenticated tests logged in as a real user."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import logging
 import os
+import re
+import threading
+import time
 import uuid
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from webdoctor.config import TOOL_VERSION, AI_MODEL_FAST
+from webdoctor.config import (
+    TOOL_VERSION,
+    MONKEY_DEFAULT_ACTIONS,
+    MONKEY_DEFAULT_DELAY_MS,
+    MONKEY_DEFAULT_SEED,
+)
 from webdoctor.models import TestReport, CheckStatus
-from webdoctor.runner import run_diagnostics
+from webdoctor.runner import run_diagnostics, validate_target_url
 from webdoctor.reporters.html_report import generate_html
 from webdoctor.reporters.markdown_report import generate_markdown
 from webdoctor.reporters.json_report import generate_json
 from webdoctor.reporters.pdf_report import generate_pdf
 from webdoctor.diagnostics.ai_adapters import list_available_models
 from webdoctor.checks.auth import perform_form_login
+from webdoctor.checks.monkey import validate_monkey_options
 
+log = logging.getLogger(__name__)
 REPORT_DIR = os.path.abspath(os.environ.get("WEBDOCTOR_REPORTS", "./reports"))
 os.makedirs(REPORT_DIR, exist_ok=True)
 
 app = FastAPI(title="WebDoctor Dashboard", version=TOOL_VERSION)
+PACKAGE_DIR = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+
+# Starlette changed TemplateResponse's signature: newer releases take the
+# request first. Support both so the declared `fastapi>=0.110` range works.
+_TEMPLATE_RESPONSE_PARAMS = inspect.signature(templates.TemplateResponse).parameters
+
+
+def _render_dashboard(request: Request):
+    if "request" in _TEMPLATE_RESPONSE_PARAMS:
+        return templates.TemplateResponse(
+            request, "dashboard.html", {"tool_version": TOOL_VERSION}
+        )
+    return templates.TemplateResponse(
+        "dashboard.html", {"request": request, "tool_version": TOOL_VERSION}
+    )
+
+
 jobs: Dict[str, Dict[str, Any]] = {}
+MAX_JOBS = 100
+JOB_TTL_SECONDS = 3600
+_jobs_lock = threading.RLock()
+_TERMINAL = ("completed", "failed")
+
+
+def _prune_jobs_locked(now: float) -> None:
+    """Remove expired finished jobs. Caller must hold _jobs_lock."""
+    expired = [
+        jid for jid, j in jobs.items()
+        if j.get("status") in _TERMINAL and now - j.get("created", now) > JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        jobs.pop(jid, None)
+
+
+def _reserve_job_slot(now: float) -> bool:
+    """Prune old jobs and make room for one new job. Never evict a running job."""
+    with _jobs_lock:
+        _prune_jobs_locked(now)
+        if len(jobs) < MAX_JOBS:
+            return True
+        finished = sorted(
+            (jid for jid, j in jobs.items() if j.get("status") in _TERMINAL),
+            key=lambda jid: jobs[jid].get("created", 0),
+        )
+        if not finished:
+            return False
+        jobs.pop(finished[0])
+        return True
+
+
+def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with _jobs_lock:
+        return jobs.get(job_id)
+
+
+def _update_job(job_id: str, **updates) -> None:
+    """Safely update a job from a worker thread (it may have been pruned)."""
+    with _jobs_lock:
+        job = jobs.get(job_id)
+        if job is not None:
+            job.update(updates)
 
 
 class DiagnoseRequest(BaseModel):
@@ -35,7 +112,7 @@ class DiagnoseRequest(BaseModel):
     links: bool = True
     ai: bool = True
     ai_provider: str = "sandbox"
-    ai_model: str = AI_MODEL_FAST
+    ai_model: Optional[str] = None
     ai_key: Optional[str] = None
     ai_base: Optional[str] = None
     ai_compare: bool = False
@@ -49,7 +126,15 @@ class DiagnoseRequest(BaseModel):
     user_field: Optional[str] = None
     pass_field: Optional[str] = None
     submit_btn: Optional[str] = None
+    login_success_selector: Optional[str] = None
     session_json: Optional[str] = None
+    insecure: bool = False
+    # Deterministic hard monkey test
+    monkey: bool = False
+    monkey_seed: int = MONKEY_DEFAULT_SEED
+    monkey_actions: int = MONKEY_DEFAULT_ACTIONS
+    monkey_delay_ms: int = MONKEY_DEFAULT_DELAY_MS
+    monkey_navigation: bool = True
 
 
 class LoginTestRequest(BaseModel):
@@ -59,14 +144,56 @@ class LoginTestRequest(BaseModel):
     user_field: Optional[str] = None
     pass_field: Optional[str] = None
     submit_btn: Optional[str] = None
+    login_success_selector: Optional[str] = None
+
+
+def _monkey_summary(report: TestReport, req: DiagnoseRequest) -> Dict[str, Any]:
+    """Small, secret-free monkey summary for dashboard progress responses."""
+    result = next((cr for cr in report.check_results if cr.category == "monkey"), None)
+    metrics = (result.metrics or {}) if result else {}
+    return {
+        "enabled": bool(req.monkey),
+        "status": result.status.value if result else "not_run",
+        "seed": metrics.get("seed", req.monkey_seed),
+        "actions_executed": metrics.get("actions_executed", 0),
+        "actions_skipped": metrics.get("actions_skipped", 0),
+        "planned_actions": metrics.get("planned_actions", req.monkey_actions),
+        "skipped_reason": metrics.get("skipped_reason"),
+        "js_error_count": metrics.get("js_error_count", 0),
+        "console_error_count": metrics.get("console_error_count", 0),
+        "page_crash_count": metrics.get("page_crash_count", 0),
+        "off_origin_blocked": len(metrics.get("off_origin_navigation_attempts") or []),
+    }
+
+
+def _sanitize_request(req: DiagnoseRequest) -> Dict[str, Any]:
+    """Return only non-sensitive configuration for progress/job inspection."""
+    return {
+        "url": req.url,
+        "browser": req.browser,
+        "links": req.links,
+        "ai": req.ai,
+        "ai_provider": req.ai_provider,
+        "ai_model": req.ai_model,
+        "ai_compare": req.ai_compare,
+        "timeout": req.timeout,
+        "pdf": req.pdf,
+        "login": req.login,
+        "insecure": req.insecure,
+        "monkey": req.monkey,
+        "monkey_seed": req.monkey_seed,
+        "monkey_actions": req.monkey_actions,
+        "monkey_delay_ms": req.monkey_delay_ms,
+        "monkey_navigation": req.monkey_navigation,
+    }
 
 
 def _background_run(job_id: str, req: DiagnoseRequest):
-    job = jobs[job_id]
+    if _get_job(job_id) is None:
+        return
 
     def _cb(msg: str, pct: float):
-        job["percent"] = int(pct * 100)
-        job["message"] = msg
+        _update_job(job_id, percent=int(pct * 100), message=msg)
 
     try:
         report_out = os.path.join(REPORT_DIR, job_id)
@@ -81,7 +208,7 @@ def _background_run(job_id: str, req: DiagnoseRequest):
                 with open(session_path, "w") as f:
                     json.dump(state, f)
             except Exception as e:
-                job["message"] = f"Invalid session JSON: {e}"
+                _update_job(job_id, message=f"Invalid session JSON: {e}")
 
         compare_list = None
         if req.ai_compare:
@@ -98,7 +225,9 @@ def _background_run(job_id: str, req: DiagnoseRequest):
             ai_provider=req.ai_provider,
             ai_model=req.ai_model,
             ai_key=req.ai_key,
-            ai_base=req.ai_base,
+            # Arbitrary custom AI endpoints are intentionally not accepted from
+            # the dashboard; the CLI remains the place for that advanced option.
+            ai_base=None,
             ai_compare=compare_list,
             timeout=req.timeout,
             screenshot_dir=shots,
@@ -110,7 +239,14 @@ def _background_run(job_id: str, req: DiagnoseRequest):
             user_field=req.user_field,
             pass_field=req.pass_field,
             submit_btn=req.submit_btn,
+            login_success_selector=req.login_success_selector,
             session_path=session_path,
+            insecure=req.insecure,
+            monkey=req.monkey,
+            monkey_seed=req.monkey_seed,
+            monkey_actions=req.monkey_actions,
+            monkey_delay_ms=req.monkey_delay_ms,
+            monkey_navigation=req.monkey_navigation,
             progress=_cb,
         )
 
@@ -120,37 +256,59 @@ def _background_run(job_id: str, req: DiagnoseRequest):
         json_path = base + ".json"
         pdf_path = base + ".pdf"
 
-        # PDF first so external tool can't wipe the html
+        # Each format is written independently, matching the CLI behaviour.
+        write_errors = []
+        for label, path, render in (
+            ("HTML", html_path, lambda: generate_html(report)),
+            ("Markdown", md_path, lambda: generate_markdown(report)),
+            ("JSON", json_path, lambda: generate_json(report)),
+        ):
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(render())
+            except Exception as e:
+                log.warning("Failed to write %s report for job %s: %s", label, job_id, e)
+                write_errors.append(label)
+        if len(write_errors) == 3:
+            raise RuntimeError(f"Could not write any report formats: {', '.join(write_errors)}")
+
         pdf_ok = False
         if req.pdf:
-            pdf_ok = generate_pdf(report, pdf_path)
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(generate_html(report))
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(generate_markdown(report))
-        with open(json_path, "w", encoding="utf-8") as f:
-            f.write(generate_json(report))
+            try:
+                pdf_ok = generate_pdf(report, pdf_path)
+            except Exception as e:
+                log.warning("Failed to write PDF report for job %s: %s", job_id, e)
+            if not pdf_ok:
+                write_errors.append("PDF")
 
-        job["status"] = "completed"
-        job["message"] = "Report ready"
-        job["percent"] = 100
-        job["report"] = {
-            "overall_grade": report.overall_grade,
-            "overall_status": report.overall_status.value,
-            "score": report.score,
-            "url": report.final_url or report.url,
-            "target_title": report.target_title,
-            "issue_counts": report.issue_counts(),
-            "duration_ms": report.duration_ms,
-            "issues": [i.__dict__ for i in report.issues],
-            "ai_summary": report.ai_summary,
-            "metrics": report.metrics,
-            "pdf_available": pdf_ok,
-            "logged_in": bool(req.login or req.session_json),
-        }
+        message = "Report ready"
+        if write_errors:
+            message += " (skipped: " + ", ".join(write_errors) + ")"
+
+        _update_job(
+            job_id,
+            status="completed",
+            message=message,
+            percent=100,
+            report={
+                "overall_grade": report.overall_grade,
+                "overall_status": report.overall_status.value,
+                "score": report.score,
+                "url": report.final_url or report.url,
+                "target_title": report.target_title,
+                "issue_counts": report.issue_counts(),
+                "duration_ms": report.duration_ms,
+                "issues": [i.to_dict() for i in report.issues],
+                "ai_summary": report.ai_summary,
+                "metrics": report.metrics,
+                "pdf_available": pdf_ok,
+                "logged_in": bool(req.login or req.session_json),
+                "monkey_summary": _monkey_summary(report, req),
+            },
+        )
     except Exception as e:
-        job["status"] = "failed"
-        job["message"] = str(e)
+        log.exception("Diagnosis job %s failed", job_id)
+        _update_job(job_id, status="failed", message=str(e))
 
 
 @app.get("/api/models")
@@ -160,23 +318,68 @@ def api_models():
 
 @app.post("/api/diagnose")
 async def api_diagnose(req: DiagnoseRequest):
+    try:
+        validate_target_url(req.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if req.ai_base:
+        raise HTTPException(400, "Custom AI base URLs are not allowed via the dashboard.")
+    try:
+        validate_monkey_options(req.monkey_seed, req.monkey_actions, req.monkey_delay_ms)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    now = time.monotonic()
+    if not _reserve_job_slot(now):
+        raise HTTPException(429, "Too many running diagnosis jobs; try again later")
     jid = uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
-    jobs[jid] = {"status": "running", "percent": 0, "message": "Queued", "req": req.model_dump(), "created": loop.time()}
-    loop.run_in_executor(None, _background_run, jid, req)
+    with _jobs_lock:
+        jobs[jid] = {
+            "status": "running",
+            "percent": 0,
+            "message": "Queued",
+            "config": _sanitize_request(req),
+            "created": now,
+        }
+
+    future = loop.run_in_executor(None, _background_run, jid, req)
+
+    def _on_done(done):
+        try:
+            done.result()
+        except Exception as e:
+            log.exception("Diagnosis worker for job %s crashed", jid)
+            job = _get_job(jid)
+            if job and job.get("status") == "running":
+                _update_job(jid, status="failed", message=f"Worker crashed: {e}")
+
+    future.add_done_callback(_on_done)
     return {"job_id": jid}
 
 
 @app.get("/api/progress/{job_id}")
 def api_progress(job_id: str):
-    j = jobs.get(job_id)
+    j = _get_job(job_id)
     if not j:
         raise HTTPException(404, "job not found")
-    return j
+    # Never return the internal job dict: it used to expose passwords, API keys,
+    # and pasted session JSON supplied by the user.
+    return {
+        "status": j.get("status"),
+        "percent": j.get("percent", 0),
+        "message": j.get("message", ""),
+        "created": j.get("created"),
+        "report": j.get("report"),
+    }
 
 
 @app.post("/api/login-test")
 def api_login_test(req: LoginTestRequest):
+    try:
+        validate_target_url(req.login_url)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     ok, res = perform_form_login(
         login_url=req.login_url,
         username=req.username,
@@ -184,6 +387,7 @@ def api_login_test(req: LoginTestRequest):
         user_field=req.user_field,
         pass_field=req.pass_field,
         submit_btn=req.submit_btn,
+        login_success_selector=req.login_success_selector,
     )
     if ok:
         cookies = res.get("cookies", [])
@@ -196,6 +400,8 @@ def api_login_test(req: LoginTestRequest):
 def api_report_file(job_id: str, fmt: str):
     mapping = {"html": ("report.html", "text/html"), "md": ("report.md", "text/markdown"),
                "json": ("report.json", "application/json"), "pdf": ("report.pdf", "application/pdf")}
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+        raise HTTPException(400, "invalid job id")
     if fmt not in mapping:
         raise HTTPException(400, "unknown format")
     fname, ctype = mapping[fmt]
@@ -205,279 +411,6 @@ def api_report_file(job_id: str, fmt: str):
     return FileResponse(path, media_type=ctype, filename=f"webdoctor-{job_id}.{fmt}")
 
 
-DASHBOARD_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WebDoctor -- Website Testing & Root-Cause Diagnostics</title>
-<style>
-:root{--bg:#0a0e1a;--card:#111827;--card2:#1a243b;--txt:#e2e8f0;--mut:#94a3b8;--border:#1f2f4f;--acc:#8b5cf6;--red:#ef4444;--green:#10b981}
-*{box-sizing:border-box} body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
-a{color:#a78bfa} .wrap{max-width:1160px;margin:0 auto;padding:26px 18px 80px}
-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:14px}
-.logo{font-size:24px;font-weight:800}.logo span{background:linear-gradient(90deg,#8b5cf6,#ec4899);-webkit-background-clip:text;color:transparent}
-.sub{color:var(--mut);font-size:13px}
-.box{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px;margin-top:18px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-input[type=text],input[type=password],select,textarea{background:#0b1220;border:1px solid var(--border);color:var(--txt);padding:11px 14px;border-radius:10px;font-size:14px}
-input[type=text]:focus,input[type=password]:focus,select:focus{outline:none;border-color:var(--acc)}
-input.url{flex:1;min-width:280px;font-size:16px}
-button{background:linear-gradient(90deg,#8b5cf6,#6d28d9);color:#fff;border:none;padding:12px 22px;border-radius:10px;font-weight:700;font-size:14px;cursor:pointer}
-button:hover{filter:brightness(1.1)} button:disabled{opacity:.4;cursor:not-allowed}
-button.sec{background:var(--card2);border:1px solid var(--border)}
-label.chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--mut);cursor:pointer}
-.details{margin-top:14px;font-size:13px} details summary{cursor:pointer;color:#a78bfa}
-.pbar{background:#0b1220;border:1px solid var(--border);border-radius:10px;height:12px;overflow:hidden;margin-top:14px}
-.pfill{height:100%;width:0;background:linear-gradient(90deg,#8b5cf6,#10b981);transition:width .25s}
-.pmsg{color:var(--mut);font-size:13px;margin-top:8px}
-.hero{display:none;margin-top:22px;grid-template-columns:200px 1fr;gap:20px}
-.grade{display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#8b5cf6,#ec4899);border-radius:14px;padding:20px;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.35)}
-.grade .big{font-size:74px;font-weight:900;line-height:1}.grade .sub{color:#fff;opacity:.9}
-.badge-auth{display:inline-block;padding:2px 8px;border-radius:6px;background:#059669;color:#fff;font-size:11px;font-weight:700;margin-left:8px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:12px}
-.stat{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center}
-.stat .n{font-size:24px;font-weight:800}.stat .l{font-size:11px;color:var(--mut);text-transform:uppercase}
-.diag{background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:18px;margin-top:16px;font-size:13px}
-.diag pre{white-space:pre-wrap;font-family:inherit;margin:0}
-.issue{border:1px solid var(--border);border-radius:10px;margin-top:8px;overflow:hidden}
-.ihead{display:flex;justify-content:space-between;padding:12px 14px;cursor:pointer;background:#0b1220;font-size:13px}
-.ibody{display:none;padding:14px;background:var(--card);font-size:13px;border-top:1px solid var(--border)}
-.crit{border-left:4px solid var(--red)} .error{border-left:4px solid #f97316} .warn{border-left:4px solid #eab308} .info{border-left:4px solid #64748b}
-.tag{display:inline-block;padding:2px 7px;border-radius:5px;font-size:10px;font-weight:800;letter-spacing:.5px;margin-right:6px}
-.tag.CRITICAL,.tag.ERROR{background:#ef444433;color:#fca5a5} .tag.WARNING{background:#eab30833;color:#fde047} .tag.INFO{background:#64748b33;color:#cbd5e1}
-.toolbar{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
-.modelnote{font-size:12px;color:var(--mut);margin-top:4px}
-.okmsg{color:#10b981;font-size:12px} .errmsg{color:#ef4444;font-size:12px}
-.chip{display:inline-block;padding:2px 7px;border-radius:5px;background:#0b1220;border:1px solid var(--border);font-size:11px;color:var(--mut);margin-right:4px}
-footer{margin-top:60px;text-align:center;color:var(--mut);font-size:12px;border-top:1px solid var(--border);padding-top:16px}
-@media(max-width:768px){.hero{grid-template-columns:1fr}}
-</style></head><body>
-<div class="wrap">
-<header>
-<div><div class="logo"><span>WebDoctor</span></div><div class="sub">Automated website testing + root-cause diagnostics with multiple AI providers</div></div>
-<div class="sub">v__VER__</div>
-</header>
-
-<div class="box">
-<form id="f">
-<div class="row">
-<input class="url" id="u" type="text" placeholder="https://your-site.com" required value="https://example.com">
-<button id="go" type="submit">Run Diagnosis</button>
-</div>
-<div class="row" style="margin-top:12px">
-<label class="chk"><input type="checkbox" id="cb_b" checked> Headless browser (JS errors & perf)</label>
-<label class="chk"><input type="checkbox" id="cb_l" checked> Crawl broken links</label>
-<label class="chk"><input type="checkbox" id="cb_ai" checked> AI root-cause diagnosis</label>
-<label class="chk"><input type="checkbox" id="cb_pdf" checked> Generate PDF</label>
-</div>
-
-<div class="details">
-<details>
-<summary>AI provider & model (ChatGPT / Gemini / Claude / comparison)</summary>
-<div style="margin-top:10px">
-<div class="row">
-<select id="ai_p" onchange="onProvChange()">
-<option value="sandbox" selected>Sandbox built-in (OpenAI-compatible) -- free/cheap</option>
-<option value="openai">OpenAI direct (api.openai.com) -- your key</option>
-<option value="anthropic">Anthropic Claude -- your key</option>
-<option value="gemini">Google Gemini direct -- your key</option>
-</select>
-<select id="ai_m" style="min-width:260px"></select>
-<label class="chk"><input type="checkbox" id="cb_cmp"> Multi-AI compare (GPT-6 Luna + Gemini 3.8 Flash together)</label>
-</div>
-<div class="row" style="margin-top:8px">
-<input type="password" id="ai_k" placeholder="API key (optional -- not needed for Sandbox models)" style="flex:1">
-<input type="text" id="ai_base" placeholder="Custom base URL (optional)" style="flex:1">
-</div>
-<div class="modelnote">Tip: leave defaults for the fastest, cheapest run. Clean sites use 0 AI credits automatically.</div>
-</div>
-</details>
-
-<details style="margin-top:10px">
-<summary>Log in and test as a real user (authenticated testing)</summary>
-<div style="margin-top:10px">
-<label class="chk"><input type="checkbox" id="cb_login"> Enable login before tests (fills credentials, then runs all checks inside the protected area)</label>
-<div class="row" style="margin-top:8px">
-<input type="text" id="login_url" placeholder="Login page URL (leave blank = same as target)" style="flex:1">
-<input type="text" id="login_u" placeholder="Username / email" style="width:230px">
-<input type="password" id="login_p" placeholder="Password" style="width:190px">
-<button type="button" class="sec" onclick="testLogin()">Verify login</button>
-</div>
-<div id="login_msg" style="margin-top:6px"></div>
-<div style="margin-top:10px"><span class="sub">Or reuse a saved session (paste Playwright storageState JSON):</span></div>
-<textarea id="sess_json" rows="3" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px" placeholder="{"cookies": [...], "origins": [...]}"></textarea>
-<div class="modelnote">Sessions are saved per-run at reports/<id>/storage_state.json for reuse.</div>
-</div>
-</details>
-</div>
-</form>
-
-<div id="prog" style="display:none;margin-top:16px">
-<div class="pmsg" id="pmsg">Starting...</div>
-<div class="pbar"><div class="pfill" id="pfill"></div></div>
-</div>
-</div>
-
-<div class="hero box" id="hero">
-<div class="grade" id="gradecard"><div class="big" id="gbig">A</div><div class="sub" id="gsub">100/100</div></div>
-<div>
-<div class="row"><strong id="rurl" style="font-size:17px"></strong><span id="authbadge"></span></div>
-<div class="stats">
-<div class="stat"><div class="n" id="scrit" style="color:#ef4444">0</div><div class="l">Critical</div></div>
-<div class="stat"><div class="n" id="serror" style="color:#f97316">0</div><div class="l">Errors</div></div>
-<div class="stat"><div class="n" id="swarn" style="color:#eab308">0</div><div class="l">Warnings</div></div>
-<div class="stat"><div class="n" id="sinfo" style="color:#64748b">0</div><div class="l">Info</div></div>
-<div class="stat"><div class="n" id="sjs">0</div><div class="l">JS Errors</div></div>
-<div class="stat"><div class="n" id="sdur">0s</div><div class="l">Duration</div></div>
-</div>
-<div class="toolbar">
-<a class="btn" id="dl_html" href="#" target="_blank"><button class="sec">Open HTML report</button></a>
-<a class="btn" id="dl_md" href="#" target="_blank"><button class="sec">Markdown</button></a>
-<a class="btn" id="dl_json" href="#" target="_blank"><button class="sec">JSON</button></a>
-<a class="btn" id="dl_pdf" href="#" target="_blank"><button class="sec">PDF</button></a>
-</div>
-</div>
-</div>
-
-<div class="diag box" id="diag" style="display:none">
-<div style="display:flex;justify-content:space-between;align-items:center"><strong>Executive Diagnosis</strong><span class="sub" id="modelused"></span></div>
-<pre id="diagbody"></pre>
-</div>
-
-<div class="box" id="issuesbox" style="display:none">
-<div class="row" style="justify-content:space-between"><strong>Issues & Root Causes (<span id="icnt">0</span>)</strong><span class="sub">click an issue to expand root cause, reproduction, and fix</span></div>
-<div id="issuelist" style="margin-top:10px"></div>
-</div>
-
-<footer>WebDoctor -- Developer-first website testing with ChatGPT, Gemini, and Claude * Open source (MIT)</footer>
-</div>
-
-<script>
-let MODEL_CAT = [];
-const PRESETS = {
-  sandbox: ["gpt-6-luna","gpt-6.1-sol","gpt-6-sol","gemini-3.8-flash","gpt-5-mini"],
-  openai: ["gpt-5.5","gpt-4.1","gpt-4o","gpt-4.1-mini","o3-mini"],
-  anthropic: ["claude-sonnet-4","claude-haiku-4","claude-opus-4"],
-  gemini: ["gemini-2.5-flash","gemini-2.5-pro","gemini-1.5-flash"],
-};
-async function loadModels(){
-  try{ const r=await fetch('/api/models'); const d=await r.json(); MODEL_CAT=d.models; }catch(e){}
-  onProvChange();
-}
-function onProvChange(){
-  const p=document.getElementById('ai_p').value; const sel=document.getElementById('ai_m'); sel.innerHTML='';
-  let ids=(PRESETS[p]||[]); const fromCat=MODEL_CAT.filter(m=>m.provider===p).map(m=>m.id);
-  ids=ids.concat(fromCat.filter(x=>!ids.includes(x)));
-  ids.forEach(id=>{ const m=MODEL_CAT.find(x=>x.id===id); const o=document.createElement('option');
-    o.value=id; o.textContent=(m&&m.label)?m.label:id; sel.appendChild(o); });
-  if(ids[0]) sel.value=ids[0];
-}
-loadModels();
-
-document.getElementById('f').addEventListener('submit', async e=>{
-  e.preventDefault();
-  const go=document.getElementById('go'); go.disabled=true;
-  const prog=document.getElementById('prog'); prog.style.display='block';
-  hideResults();
-  const body={
-    url: document.getElementById('u').value,
-    browser: document.getElementById('cb_b').checked,
-    links: document.getElementById('cb_l').checked,
-    ai: document.getElementById('cb_ai').checked,
-    ai_provider: document.getElementById('ai_p').value,
-    ai_model: document.getElementById('ai_m').value,
-    ai_key: document.getElementById('ai_k').value||null,
-    ai_base: document.getElementById('ai_base').value||null,
-    ai_compare: document.getElementById('cb_cmp').checked,
-    pdf: document.getElementById('cb_pdf').checked,
-    login: document.getElementById('cb_login').checked,
-    login_url: document.getElementById('login_url').value||null,
-    username: document.getElementById('login_u').value||null,
-    password: document.getElementById('login_p').value||null,
-    session_json: document.getElementById('sess_json').value.trim()||null,
-  };
-  const res=await fetch('/api/diagnose',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-  const {job_id}=await res.json();
-  poll(job_id);
-});
-
-async function testLogin(){
-  const msg=document.getElementById('login_msg'); msg.className='sub'; msg.textContent='Testing login...';
-  try{
-    const r=await fetch('/api/login-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      login_url:document.getElementById('login_url').value||document.getElementById('u').value,
-      username:document.getElementById('login_u').value, password:document.getElementById('login_p').value,
-    })});
-    const d=await r.json();
-    if(d.ok){ msg.className='okmsg'; msg.textContent=d.message; }
-    else{ msg.className='errmsg'; msg.textContent=d.error; }
-  }catch(e){ msg.className='errmsg'; msg.textContent='Login test failed: '+e; }
-}
-
-async function poll(id){
-  for(let i=0;i<180;i++){
-    await new Promise(r=>setTimeout(r,1000));
-    const r=await fetch('/api/progress/'+id); const d=await r.json();
-    document.getElementById('pmsg').textContent=(d.message||'')+' ('+ (d.percent||0)+'%)';
-    document.getElementById('pfill').style.width=(d.percent||0)+'%';
-    if(d.status==='completed'){ render(id,d.report); break; }
-    if(d.status==='failed'){ document.getElementById('pmsg').textContent='Failed: '+(d.message||''); break; }
-  }
-  document.getElementById('go').disabled=false;
-}
-
-function hideResults(){ document.getElementById('hero').style.display='none'; document.getElementById('diag').style.display='none'; document.getElementById('issuesbox').style.display='none'; }
-
-function render(id, rep){
-  document.getElementById('hero').style.display='grid';
-  document.getElementById('gbig').textContent=rep.overall_grade;
-  document.getElementById('gsub').textContent=rep.score+'/100 * '+rep.overall_status.toUpperCase();
-  const gmap={A:'#10b981',B:'#06b6d4',C:'#eab308',D:'#f97316',F:'#ef4444'};
-  document.getElementById('gradecard').style.background='linear-gradient(135deg,'+(gmap[rep.overall_grade]||'#8b5cf6')+',#ec4899)';
-  document.getElementById('rurl').textContent=rep.url+(rep.target_title?' -- '+rep.target_title:'');
-  const ab=document.getElementById('authbadge'); ab.innerHTML=rep.logged_in?'<span class="badge-auth">LOGGED IN RUN</span>':'';
-  const c=rep.issue_counts||{}; document.getElementById('scrit').textContent=c.critical||0;
-  document.getElementById('serror').textContent=c.error||0; document.getElementById('swarn').textContent=c.warning||0;
-  document.getElementById('sinfo').textContent=c.info||0;
-  document.getElementById('sjs').textContent=(rep.metrics||{}).js_error_count||0;
-  document.getElementById('sdur').textContent=((rep.duration_ms||0)/1000).toFixed(1)+'s';
-  document.getElementById('dl_html').href='/api/reports/'+id+'/html';
-  document.getElementById('dl_md').href='/api/reports/'+id+'/md';
-  document.getElementById('dl_json').href='/api/reports/'+id+'/json';
-  document.getElementById('dl_pdf').href='/api/reports/'+id+'/pdf';
-  if(!rep.pdf_available) document.getElementById('dl_pdf').style.display='none';
-
-  if(rep.ai_summary){ const d=document.getElementById('diag'); d.style.display='block';
-    document.getElementById('diagbody').textContent=rep.ai_summary; }
-
-  const box=document.getElementById('issuesbox'); const list=document.getElementById('issuelist'); list.innerHTML='';
-  const issues=rep.issues||[]; document.getElementById('icnt').textContent=issues.length;
-  if(issues.length){ box.style.display='block'; }
-  issues.forEach((it,idx)=>{
-    const el=document.createElement('div');
-    const sev=(it.severity||'info').toLowerCase();
-    el.className='issue '+(sev==='critical'?'crit':sev==='error'?'error':sev==='warning'?'warn':'info');
-    const head=document.createElement('div'); head.className='ihead';
-    head.innerHTML='<div><span class="tag '+(it.severity||'').toUpperCase()+'">'+(it.severity||'').toUpperCase()+'</span>'
-      +'<span class="chip">'+(it.category||'')+'</span><b>'+esc(it.title||'')+'</b>'
-      +' <span class="sub" style="margin-left:8px">'+esc(it.summary||'')+'</span></div><span class="sub"># '+(idx+1)+' &#x25BC;</span>';
-    const body=document.createElement('div'); body.className='ibody';
-    let html='';
-    if(it.how_it_happened) html+='<p><b>How it happened:</b> '+esc(it.how_it_happened)+'</p>';
-    if(it.reproduction) html+='<p><b>Reproduce:</b> <code>'+esc(it.reproduction)+'</code></p>';
-    if(it.fix) html+='<p><b>Fix:</b> '+esc(it.fix)+'</p>';
-    if(it.detail) html+='<p class="sub" style="white-space:pre-wrap">'+esc(it.detail)+'</p>';
-    body.innerHTML=html;
-    head.onclick=()=>{ body.style.display = body.style.display==='block'?'none':'block'; };
-    el.appendChild(head); el.appendChild(body); list.appendChild(el);
-  });
-}
-function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
-</script>
-</body></html>"""
-
-DASHBOARD_HTML = DASHBOARD_HTML.replace("__VER__", TOOL_VERSION)
-
-
 @app.get("/", response_class=HTMLResponse)
-def index():
-    return HTMLResponse(DASHBOARD_HTML)
+def index(request: Request):
+    return _render_dashboard(request)

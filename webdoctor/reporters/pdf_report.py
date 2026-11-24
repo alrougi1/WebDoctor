@@ -1,55 +1,42 @@
-"""PDF report generator: markdown -> manus-md-to-pdf, with weasyprint fallback."""
+"""Deterministic PDF report generation via WeasyPrint.
+
+WeasyPrint is the only supported renderer: the previous ``manus-md-to-pdf``
+path depended on a Manus-only CLI and produced environment-specific output.
+If WeasyPrint or its system libraries are unavailable, PDF generation is
+skipped with a clear warning and the other report formats are unaffected.
+"""
 from __future__ import annotations
 
-import os
-import subprocess
-import tempfile
 import logging
-from typing import Optional
+import os
+from pathlib import Path
 
 from webdoctor.models import TestReport
-from webdoctor.reporters.markdown_report import generate_markdown
 
 log = logging.getLogger(__name__)
 
 
 def generate_pdf(report: TestReport, output_path: str) -> bool:
-    """Generate a PDF report. Tries manus-md-to-pdf first, then weasyprint."""
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    md_content = generate_markdown(report)
-
-    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
-        f.write(md_content)
-        tmp_md = f.name
-
+    """Write a PDF report with WeasyPrint; return False when PDF is unavailable."""
+    output = Path(os.path.abspath(output_path))
     try:
-        # Method 1: manus-md-to-pdf CLI
-        res = subprocess.run(
-            ["manus-md-to-pdf", tmp_md, output_path],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            return True
-        log.warning("manus-md-to-pdf failed: %s", res.stderr)
-    except FileNotFoundError:
-        log.info("manus-md-to-pdf not found, trying weasyprint")
-    except Exception as e:
-        log.warning("manus-md-to-pdf error: %s", e)
-    finally:
-        try:
-            os.unlink(tmp_md)
-        except Exception:
-            pass
-
-    # Method 2: weasyprint fallback
-    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
         from weasyprint import HTML  # type: ignore
         from webdoctor.reporters.html_report import generate_html
-        html = generate_html(report)
-        HTML(string=html).write_pdf(output_path)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-    except Exception as e:
-        log.error("weasyprint fallback failed: %s", e)
+
+        HTML(string=generate_html(report)).write_pdf(str(output))
+    except ImportError as e:
+        log.warning("PDF generation skipped: WeasyPrint is not installed (%s)", e)
         return False
+    except Exception as e:
+        log.warning(
+            "PDF generation skipped: WeasyPrint could not render this report (%s). "
+            "Install WeasyPrint's system libraries or use the HTML/Markdown/JSON reports.",
+            e,
+        )
+        return False
+
+    if not output.exists() or output.stat().st_size == 0:
+        log.warning("PDF generation skipped: WeasyPrint produced no output")
+        return False
+    return True

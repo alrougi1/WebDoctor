@@ -1,11 +1,12 @@
 """Data models for WebDoctor website testing & diagnostics."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
+import re
 
 
 class Severity(str, Enum):
@@ -20,6 +21,47 @@ class CheckStatus(str, Enum):
     WARN = "warn"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+SEVERITY_RANK = {
+    Severity.CRITICAL: 0,
+    Severity.ERROR: 1,
+    Severity.WARNING: 2,
+    Severity.INFO: 3,
+}
+
+# Scoring policy (documented in README): critical issues are never capped;
+# errors count at most 3 per category and warnings at most 5 per category.
+SCORE_WEIGHTS = {Severity.CRITICAL: 30, Severity.ERROR: 15, Severity.WARNING: 4}
+MAX_ERRORS_PER_CATEGORY = 3
+MAX_WARNINGS_PER_CATEGORY = 5
+
+_STATUS_RE = re.compile(r"\b([45]\d{2})\b")
+_INDEX_SUFFIX_RE = re.compile(r"_\d+$")
+_URL_RE = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def _issue_target_url(issue: "Issue") -> str:
+    explicit = issue.extra.get("url")
+    if explicit:
+        return str(explicit).rstrip(".,);")
+    match = _URL_RE.search(f"{issue.summary} {issue.detail}")
+    return match.group(0).rstrip(".,);") if match else ""
+
+
+def _root_cause_key(issue: "Issue") -> Tuple[str, str, str]:
+    """Stable fingerprint: cause category + normalized id + target URL.
+
+    Status-based issues from different suites (HTTP_4XX, LINK_BROKEN_n,
+    NET_FAIL_n) collapse to the same root cause when they describe the same
+    HTTP status on the same URL.
+    """
+    base = _INDEX_SUFFIX_RE.sub("", issue.id.upper())
+    status_match = _STATUS_RE.search(f"{issue.summary} {issue.detail}")
+    status = status_match.group(1) if status_match else None
+    if status and base.startswith(("HTTP_", "LINK_", "NET_")):
+        return ("http_status", f"HTTP_{status}", _issue_target_url(issue))
+    return (issue.category, base, _issue_target_url(issue))
 
 
 @dataclass
@@ -62,6 +104,9 @@ class CheckResult:
 
 @dataclass
 class TestReport:
+    # Imported into several test modules; pytest must not try to collect it.
+    __test__ = False
+
     url: str
     target_title: str = ""
     final_url: str = ""
@@ -78,28 +123,71 @@ class TestReport:
     screenshot_path: Optional[str] = None
     ai_summary: Optional[str] = None
     tool_version: str = "1.0.0"
+    score_breakdown: Dict[str, Any] = field(default_factory=dict)
 
     def compute_summary(self) -> "TestReport":
-        """Compute the score, grade, and aggregate issues."""
-        self.issues = []
-        for cr in self.check_results:
-            self.issues.extend(cr.issues)
+        """De-duplicate root causes, then compute score, grade, and status."""
+        raw_issues = [i for cr in self.check_results for i in cr.issues]
+        raw_counts = {
+            sev.value: sum(1 for i in raw_issues if i.severity == sev)
+            for sev in Severity
+        }
 
-        # Count penalties
+        # Collapse repeated root causes; every occurrence stays in the detailed
+        # check_results lists, while self.issues holds one representative each.
+        grouped: Dict[Tuple[str, str, str], Issue] = {}
+        order: List[Tuple[str, str, str]] = []
+        for issue in raw_issues:
+            key = _root_cause_key(issue)
+            if key not in grouped:
+                fingerprint = "|".join(key)
+                grouped[key] = replace(issue, extra=dict(issue.extra))
+                grouped[key].extra["fingerprint"] = fingerprint
+                grouped[key].extra["occurrences"] = 0
+                order.append(key)
+            representative = grouped[key]
+            representative.extra["occurrences"] += 1
+            if SEVERITY_RANK[issue.severity] < SEVERITY_RANK[representative.severity]:
+                occurrences = representative.extra["occurrences"]
+                fingerprint = representative.extra["fingerprint"]
+                grouped[key] = replace(
+                    issue,
+                    extra={**issue.extra, "occurrences": occurrences, "fingerprint": fingerprint},
+                )
+        self.issues = [grouped[key] for key in order]
+
         crit = sum(1 for i in self.issues if i.severity == Severity.CRITICAL)
-        err = sum(1 for i in self.issues if i.severity == Severity.ERROR)
-        warn = sum(1 for i in self.issues if i.severity == Severity.WARNING)
-
-        score = 100 - (crit * 30) - (err * 15) - (warn * 4)
-        score = max(0, min(100, score))
+        errors_by_category: Dict[str, int] = {}
+        warnings_by_category: Dict[str, int] = {}
+        for issue in self.issues:
+            if issue.severity == Severity.ERROR:
+                errors_by_category[issue.category] = errors_by_category.get(issue.category, 0) + 1
+            elif issue.severity == Severity.WARNING:
+                warnings_by_category[issue.category] = warnings_by_category.get(issue.category, 0) + 1
+        capped_errors = {
+            cat: min(count, MAX_ERRORS_PER_CATEGORY)
+            for cat, count in errors_by_category.items()
+        }
+        capped_warnings = {
+            cat: min(count, MAX_WARNINGS_PER_CATEGORY)
+            for cat, count in warnings_by_category.items()
+        }
+        penalties = {
+            "critical": crit * SCORE_WEIGHTS[Severity.CRITICAL],
+            "error": sum(capped_errors.values()) * SCORE_WEIGHTS[Severity.ERROR],
+            "warning": sum(capped_warnings.values()) * SCORE_WEIGHTS[Severity.WARNING],
+            "info": 0,
+        }
+        score = max(0, min(100, 100 - sum(penalties.values())))
         self.score = score
+        eff_err = sum(capped_errors.values())
 
         if score >= 90:
             self.overall_grade = "A"
             self.overall_status = CheckStatus.PASSED
         elif score >= 75:
             self.overall_grade = "B"
-            self.overall_status = CheckStatus.WARN if err == 0 else CheckStatus.FAILED
+            self.overall_status = CheckStatus.WARN if eff_err == 0 else CheckStatus.FAILED
         elif score >= 60:
             self.overall_grade = "C"
             self.overall_status = CheckStatus.FAILED
@@ -110,10 +198,21 @@ class TestReport:
             self.overall_grade = "F"
             self.overall_status = CheckStatus.FAILED
 
-        # Critical issues force failed status
         if crit > 0:
             self.overall_status = CheckStatus.FAILED
 
+        self.score_breakdown = {
+            "formula": (
+                "100 - 30*critical - 15*errors (max 3/category) "
+                "- 4*warnings (max 5/category); info never penalized"
+            ),
+            "raw_counts": raw_counts,
+            "deduplicated_counts": self.issue_counts(),
+            "duplicates_collapsed": len(raw_issues) - len(self.issues),
+            "penalties": penalties,
+            "capped_errors_by_category": capped_errors,
+            "capped_warnings_by_category": capped_warnings,
+        }
         return self
 
     def issue_counts(self) -> Dict[str, int]:

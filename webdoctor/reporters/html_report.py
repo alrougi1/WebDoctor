@@ -25,18 +25,39 @@ SEV_COLORS = {
     Severity.INFO:     ("#64748b", "#f1f5f9"),
 }
 
+# Allowlist used for AI-generated markdown before it is embedded in the report.
+ALLOWED_HTML_TAGS = [
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "strong", "em", "b", "i",
+    "ul", "ol", "li", "code", "pre", "blockquote", "a", "table", "thead", "tbody",
+    "tr", "th", "td", "span", "div",
+]
+ALLOWED_HTML_ATTRS = {
+    "a": ["href", "title"],
+    "code": ["class"],
+    "pre": ["class"],
+    "span": ["class"],
+    "div": ["class"],
+}
+
 
 def _esc(s: Optional[str]) -> str:
     return html_escape.escape(str(s or ""), quote=True)
 
 
 def _md_to_html(md: str) -> str:
-    """Lightweight markdown -> HTML converter (safe, no external dependency required)."""
+    """Markdown -> HTML converter. AI output is sanitized before embedding."""
     if not md:
         return ""
     try:
         import markdown as mdlib
-        return mdlib.markdown(md, extensions=["fenced_code", "tables"])
+        import bleach
+        rendered = mdlib.markdown(md, extensions=["fenced_code", "tables"])
+        return bleach.clean(
+            rendered,
+            tags=ALLOWED_HTML_TAGS,
+            attributes=ALLOWED_HTML_ATTRS,
+            strip=True,
+        )
     except Exception:
         pass
     # Fallback basic conversion
@@ -60,6 +81,68 @@ def _screenshot_data_uri(path: Optional[str]) -> Optional[str]:
         return f"data:image/png;base64,{b64}"
     except Exception:
         return None
+
+
+def _monkey_section(report: TestReport) -> str:
+    """Render the deterministic monkey-test trace as its own report section."""
+    monkey = next((cr for cr in report.check_results if cr.category == "monkey"), None)
+    if monkey is None:
+        return ""
+    mm = monkey.metrics or {}
+    if monkey.status == CheckStatus.SKIPPED:
+        return (
+            '<section class="sec"><h2>Hard Monkey Test</h2>'
+            f'<div class="empty">Skipped ({_esc(mm.get("skipped_reason", "not run"))}).</div></section>'
+        )
+
+    rows = []
+    for step in (mm.get("trace") or [])[:50]:
+        target = (step.get("selector") or step.get("key") or
+                  (f"scroll dy={step.get('dy')}" if step.get("dy") is not None else
+                   f"viewport {step.get('width')}x{step.get('height')}" if step.get("width") else "window"))
+        rows.append(
+            "<tr><td>" + _esc(step.get("step", "")) + "</td><td>" + _esc(step.get("type", "")) +
+            "</td><td><code>" + _esc(target) + "</code></td><td>" + _esc(step.get("result", "")) +
+            "</td><td>" + _esc(step.get("url", "")) + "</td></tr>"
+        )
+    trace_html = "".join(rows) or "<tr><td colspan='5'>No actions were executed.</td></tr>"
+    offsite = mm.get("off_origin_navigation_attempts") or []
+    stats = [
+        ("Seed", mm.get("seed", "n/a")),
+        ("Actions", f"{mm.get('actions_executed', 0)}/{mm.get('planned_actions', 0)} executed"),
+        ("Skipped", mm.get("actions_skipped", 0)),
+        ("JS errors", mm.get("js_error_count", 0)),
+        ("Console errors", mm.get("console_error_count", 0)),
+        ("Dialogs", mm.get("dialog_count", 0)),
+        ("Crashes", mm.get("page_crash_count", 0)),
+        ("Blocked submits", mm.get("blocked_submit_count", 0)),
+        ("Blocked writes", mm.get("blocked_mutation_count", 0)),
+        ("Off-origin blocked", len(offsite)),
+    ]
+    stat_cards = "".join(
+        f'<div class="stat"><div class="stat-k">{_esc(label)}</div>'
+        f'<div class="stat-v">{_esc(value)}</div></div>' for label, value in stats
+    )
+    fingerprint = mm.get("config_fingerprint")
+    fingerprint_html = (
+        f'<p class="sub">Run fingerprint: <code>{_esc(fingerprint)}</code> — '
+        'the same seed and options produce the same action plan.</p>' if fingerprint else ""
+    )
+    return f"""
+<section class="sec">
+  <h2>Hard Monkey Test — Deterministic Browser Chaos</h2>
+  <div class="diag-box">
+    <div class="stats-grid">{stat_cards}</div>
+    {fingerprint_html}
+  </div>
+  <details style="margin-top:12px">
+    <summary><strong>Action trace ({len(mm.get('trace') or [])} steps)</strong></summary>
+    <table style="margin-top:10px">
+      <thead><tr><th>Step</th><th>Action</th><th>Target</th><th>Result</th><th>URL</th></tr></thead>
+      <tbody>{trace_html}</tbody>
+    </table>
+  </details>
+</section>"""
 
 
 def generate_html(report: TestReport) -> str:
@@ -89,7 +172,7 @@ def generate_html(report: TestReport) -> str:
           <div class="issue-drawer">
             {f'<div class="box detail-box"><strong>Technical detail</strong><pre>{detail_lines}</pre></div>' if it.detail else ''}
             {f'<div class="box how-box"><strong>How the error happened</strong><p>{_esc(it.how_it_happened)}</p></div>' if it.how_it_happened else ''}
-            {f'<div class="box repro-box"><strong>Reproduction</strong><code>{_esc(it.reproduction)}</code><button class="copy-btn" onclick="navigator.clipboard.writeText({json.dumps(it.reproduction)});this.innerText=\'Copied!\';setTimeout(()=>this.innerText=\'Copy\',1500)">Copy</button></div>' if it.reproduction else ''}
+            {f'<div class="box repro-box"><strong>Reproduction</strong><code>{_esc(it.reproduction)}</code><button class="copy-btn" data-copy="{_esc(it.reproduction)}">Copy</button></div>' if it.reproduction else ''}
             {f'<div class="box fix-box"><strong>Recommended fix</strong><p>{_esc(it.fix)}</p></div>' if it.fix else ''}
           </div>
         </article>""")
@@ -238,6 +321,8 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
   </table>
 </section>
 
+{_monkey_section(report)}
+
 {f'<section class="sec"><h2>Page Timing Waterfall</h2>{timing_html}</section>' if tvals else ''}
 
 {f'<section class="sec"><h2>Visual Evidence</h2><img class="shot" src="{ss_uri}" alt="Full page screenshot"></section>' if ss_uri else ''}
@@ -245,14 +330,14 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
 <div class="toolbar">
   <button class="btn" onclick="window.print()">Print / Save PDF</button>
   <button class="btn sec" onclick="downloadJSON()">Download JSON</button>
-  <a class="btn sec" href="report.md" download>Download Markdown</a>
+  <a class="btn sec" id="dl_md_report" href="report.md" download>Download Markdown</a>
 </div>
 
 <footer>Generated by WebDoctor &bull; The developer-first website testing &amp; diagnostics toolkit</footer>
 </div>
 
 <script>
-const reportData = {json.dumps(report.to_dict())};
+const reportData = {json.dumps(report.to_dict(), default=str).replace("</", "<\\/")};
 function downloadJSON(){{
   const b=new Blob([JSON.stringify(reportData,null,2)],{{type:'application/json'}});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='webdoctor-report.json';a.click();
@@ -268,6 +353,15 @@ document.getElementById('expAll').onclick=function(){{
   document.querySelectorAll('.issue-card').forEach(it=>it.classList.toggle('open',expanded));
   this.innerText=expanded?'Collapse all':'Expand all';
 }};
+document.querySelectorAll('.copy-btn').forEach(b=>b.onclick=()=>{{
+  navigator.clipboard.writeText(b.dataset.copy||'');
+  const old=b.innerText; b.innerText='Copied!';
+  setTimeout(()=>{{b.innerText=old;}},1500);
+}});
+// When served by the dashboard, report files live at /api/reports/<id>/<fmt>.
+if(location.pathname.startsWith('/api/reports/')){{
+  document.getElementById('dl_md_report').href='md';
+}}
 </script>
 </body>
 </html>"""

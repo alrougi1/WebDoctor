@@ -74,6 +74,8 @@ def perform_form_login(
     submit_btn: Optional[str] = None,
     headless: bool = True,
     timeout_ms: int = MAX_PAGE_WAIT_MS,
+    ignore_https_errors: bool = False,
+    login_success_selector: Optional[str] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Log in through a form and return (success, storage_state_dict)."""
     with sync_playwright() as p:
@@ -84,7 +86,7 @@ def perform_form_login(
         ctx = browser.new_context(
             user_agent=DEFAULT_USER_AGENT,
             viewport={"width": 1440, "height": 900},
-            ignore_https_errors=True,
+            ignore_https_errors=ignore_https_errors,
         )
         page = ctx.new_page()
 
@@ -143,25 +145,72 @@ def perform_form_login(
                 pass
 
         final_url = page.url
-        # If we're still on the exact login page AND an error is visible, login failed
+        state = ctx.storage_state()
+
+        # A visible error is authoritative: the application rejected the login.
         if visible_error:
             browser.close()
             return False, {"error": f"Login refused with message: {visible_error}", "final_url": final_url}
 
-        if final_url == login_url and "login" in final_url.lower():
+        # Look for positive proof instead of relying on the URL alone. SPAs often
+        # authenticate without navigating, while an error page can still redirect.
+        auth_keys = ("session", "token", "auth", "sid", "jwt")
+        cookies = state.get("cookies", [])
+        auth_cookie = any(any(k in c.get("name", "").lower() for k in auth_keys)
+                          for c in cookies)
+        storage_token = any(
+            any(k in item.get("name", "").lower() for k in auth_keys)
+            for origin in state.get("origins", [])
+            for item in origin.get("localStorage", [])
+        )
+        success_element = False
+        if login_success_selector:
+            try:
+                success_element = page.locator(login_success_selector).first.is_visible(timeout=800)
+            except Exception:
+                success_element = False
+        url_changed = final_url.rstrip("/") != login_url.rstrip("/")
+        still_on_login = "login" in urlparse(final_url).path.lower()
+        if url_changed and still_on_login and not (auth_cookie or storage_token or success_element):
             browser.close()
-            return False, {"error": "Still on login page after submission -- invalid credentials or bot block.", "final_url": final_url}
+            return False, {
+                "error": "Redirected back to a login page after submission -- invalid credentials or bot block.",
+                "final_url": final_url,
+            }
 
-        state = ctx.storage_state()
+        if not (auth_cookie or storage_token or success_element or url_changed):
+            browser.close()
+            return False, {
+                "error": "No authenticated session indicator found after submission "
+                         "(no auth cookie/token and no URL change). Provide --login-success-selector "
+                         "if your app authenticates without a cookie.",
+                "final_url": final_url,
+            }
+
         browser.close()
-        return True, {"state": state, "final_url": final_url, "cookies": state.get("cookies", [])}
+        return True, {
+            "state": state,
+            "final_url": final_url,
+            "cookies": cookies,
+            "auth_indicators": {
+                "auth_cookie": auth_cookie,
+                "storage_token": storage_token,
+                "success_element": success_element,
+                "url_changed": url_changed,
+            },
+        }
 
 
-def record_session_headful(login_url: str, out_path: str, timeout_sec: int = 300) -> Tuple[bool, str]:
+def record_session_headful(
+    login_url: str,
+    out_path: str,
+    timeout_sec: int = 300,
+    ignore_https_errors: bool = False,
+) -> Tuple[bool, str]:
     """Open a visible browser so the user can log in manually (2FA/SSO), then save the session."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=["--no-sandbox"])
-        ctx = browser.new_context(user_agent=DEFAULT_USER_AGENT, ignore_https_errors=True)
+        ctx = browser.new_context(user_agent=DEFAULT_USER_AGENT, ignore_https_errors=ignore_https_errors)
         page = ctx.new_page()
         page.goto(login_url)
         print(f"\nA browser window opened for {login_url}.")

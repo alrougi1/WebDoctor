@@ -24,23 +24,41 @@ SURVEY_TRACKER_SIGNATURES = [
     ("Refiner (survey platform)", "refiner.io"),
 ]
 
+# Only dismiss controls inside real dialogs/consent containers or known vendor
+# roots. A bare "Accept"/"Close" button elsewhere can be a form submit and must
+# never be clicked by the diagnostic runner.
 OVERLAY_DISMISS_SELECTORS = [
     "#onetrust-accept-btn-handler",
-    "button[aria-label='Accept all cookies']",
-    "button:has-text('Accept All')",
-    "button:has-text('Accept all')",
-    "button:has-text('Allow all')",
-    "button:has-text('Accept')",
-    "button:has-text('I agree')",
-    "button:has-text('Got it')",
-    "[aria-label='Close']",
-    "[aria-label='close']",
-    "button.close",
-    "button[aria-label='Dismiss']",
+    "#onetrust-consent-sdk button[id*='accept' i]",
+    "[role='dialog'] button:has-text('Accept')",
+    "[role='dialog'] button:has-text('I agree')",
+    "[role='dialog'] button:has-text('Got it')",
+    "[role='dialog'] button[aria-label*='close' i]",
+    "[role='dialog'] [data-testid='modal-close-button']",
+    ".modal button.close",
+    ".cookie-banner button:has-text('Accept')",
+    "#cookie-consent button:has-text('Accept')",
     ".survey-modal .close",
-    "[data-testid='modal-close-button']",
     "#hotjar-feedback button[aria-label*='close' i]",
 ]
+
+
+def _dismiss_overlays(page) -> bool:
+    """Click at most one clearly-scoped overlay control; return whether it clicked."""
+    for selector in OVERLAY_DISMISS_SELECTORS:
+        try:
+            element = page.locator(selector).first
+            if not element.is_visible(timeout=500):
+                continue
+            # Extra guard: never activate a form submit button, even inside a dialog.
+            if element.evaluate("(node) => node.type === 'submit' && !!node.closest('form')"):
+                continue
+            element.click(timeout=1500)
+            page.wait_for_timeout(250)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def run_browser_check(
@@ -48,6 +66,7 @@ def run_browser_check(
     screenshot_dir: Optional[str] = None,
     timeout_ms: int = MAX_PAGE_WAIT_MS,
     session_path: Optional[str] = None,
+    ignore_https_errors: bool = False,
 ) -> CheckResult:
     issues: List[Issue] = []
     metrics: Dict[str, Any] = {}
@@ -72,7 +91,7 @@ def run_browser_check(
             context = browser.new_context(
                 user_agent=DEFAULT_USER_AGENT,
                 viewport={"width": 1440, "height": 900},
-                ignore_https_errors=True,
+                ignore_https_errors=ignore_https_errors,
                 storage_state=session_path if session_path and os.path.exists(session_path) else None,
             )
             page = context.new_page()
@@ -171,16 +190,7 @@ def run_browser_check(
 
             # Dismiss intrusive survey / feedback / cookie popups so the test sees real content
             page.wait_for_timeout(400)
-            for sel in OVERLAY_DISMISS_SELECTORS:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=500):
-                        el.click(timeout=1500)
-                        dismissed_overlay = True
-                        page.wait_for_timeout(250)
-                        break
-                except Exception:
-                    pass
+            dismissed_overlay = _dismiss_overlays(page)
 
             # Performance timing via browser PerformanceNavigationTiming API
             perf = {}

@@ -4,12 +4,17 @@ from __future__ import annotations
 import argparse
 import sys
 import os
-import traceback
 from typing import Optional, List, Dict
 
 from webdoctor.models import CheckStatus, Severity
-from webdoctor.runner import run_diagnostics, normalize_url
-from webdoctor.config import TOOL_VERSION, AI_MODEL_FAST
+from webdoctor.runner import run_diagnostics, normalize_url, validate_target_url
+from webdoctor.config import (
+    TOOL_VERSION,
+    default_model_for_provider,
+    MONKEY_DEFAULT_ACTIONS,
+    MONKEY_DEFAULT_DELAY_MS,
+    MONKEY_DEFAULT_SEED,
+)
 from webdoctor.reporters.markdown_report import generate_markdown
 from webdoctor.reporters.html_report import generate_html
 from webdoctor.reporters.json_report import generate_json
@@ -58,9 +63,33 @@ def _parse_compare(s: Optional[str]) -> Optional[List[Dict[str, str]]]:
     return out or None
 
 
+def apply_ai_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    """Resolve the model default from the selected provider.
+
+    Kept as a single post-parse step so `--ai-model` always wins, regardless of
+    the order in which the user passes `--ai-provider` and `--ai-model`.
+    """
+    if hasattr(args, "ai_model") and hasattr(args, "ai_provider"):
+        if not args.ai_model:
+            args.ai_model = default_model_for_provider(args.ai_provider)
+    return args
+
+
+class WebDoctorArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that resolves provider-specific AI defaults after parsing."""
+
+    def parse_args(self, args=None, namespace=None):
+        return apply_ai_defaults(super().parse_args(args, namespace))
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     console, Panel, Table, Progress, SpinnerColumn, TextColumn = _try_rich()
     ci = getattr(args, "ci", False)
+
+    if getattr(args, "monkey", False) and args.no_browser:
+        print("[error] --monkey requires the headless browser suite; remove --no-browser.",
+              file=sys.stderr)
+        return 1
 
     if console and not ci:
         console.print(f"[bold]WebDoctor[/bold] v{TOOL_VERSION} -- website diagnostics\n", highlight=False)
@@ -111,7 +140,15 @@ def cmd_check(args: argparse.Namespace) -> int:
             user_field=args.user_field,
             pass_field=args.pass_field,
             submit_btn=args.submit_btn,
+            login_success_selector=getattr(args, "login_success_selector", None),
             session_path=args.session,
+            allow_private=getattr(args, "allow_private", False),
+            insecure=getattr(args, "insecure", False),
+            monkey=getattr(args, "monkey", False),
+            monkey_seed=getattr(args, "monkey_seed", MONKEY_DEFAULT_SEED),
+            monkey_actions=getattr(args, "monkey_actions", MONKEY_DEFAULT_ACTIONS),
+            monkey_delay_ms=getattr(args, "monkey_delay_ms", MONKEY_DEFAULT_DELAY_MS),
+            monkey_navigation=not getattr(args, "monkey_no_navigation", False),
             progress=progress_cb,
         )
     finally:
@@ -119,10 +156,15 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     counts = report.issue_counts()
     authed = bool(args.login or args.session)
+    monkey_on = bool(getattr(args, "monkey", False))
+    monkey_badge = (
+        f"  [bold magenta]* MONKEY seed={getattr(args, 'monkey_seed', MONKEY_DEFAULT_SEED)}[/bold magenta]"
+        if monkey_on else ""
+    )
 
     if console and not ci:
         st = GRADE_STYLE.get(report.overall_grade, "bold")
-        badge = "  [bold green]* AUTHENTICATED RUN[/bold green]" if authed else ""
+        badge = ("  [bold green]* AUTHENTICATED RUN[/bold green]" if authed else "") + monkey_badge
         console.print()
         console.print(Panel(
             f"[bold]GRADE[/bold] [{st}]{report.overall_grade}[/]  *  Score {report.score}/100  *  {report.overall_status.value.upper()}{badge}\n"
@@ -165,43 +207,59 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"\nWebDoctor -- {report.url}")
         print(f"Grade: {report.overall_grade} ({report.score}/100) -- {report.overall_status.value.upper()}")
         print(f"Issues: critical={counts['critical']} error={counts['error']} warning={counts['warning']} info={counts['info']}")
+        if monkey_on:
+            monkey_metrics = (report.metrics.get("monkey") or {})
+            print(f"Monkey: seed={monkey_metrics.get('seed', args.monkey_seed)} "
+                  f"actions={monkey_metrics.get('actions_executed', 0)}/{monkey_metrics.get('planned_actions', args.monkey_actions)} "
+                  f"skipped={monkey_metrics.get('actions_skipped', 0)}")
         for it in report.issues[:8]:
             print(f"- [{it.severity.value.upper()}] {it.title}")
 
-    # Write report files: PDF FIRST, then HTML/MD/JSON
+    # Write each format independently: a failure in one must not discard the others.
     md_path = args.out_md or os.path.join(report_dir, "report.md")
     html_path = args.out_html or os.path.join(report_dir, "report.html")
     json_path = args.out_json or os.path.join(report_dir, "report.json")
 
+    def _write_text(label: str, path: str, render) -> bool:
+        try:
+            content = render()
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            print(f"[error] failed to write {label} report to {path}: {e}", file=sys.stderr)
+            return False
+
+    written = []
+    if _write_text("Markdown", md_path, lambda: generate_markdown(report)):
+        written.append(("Markdown", md_path))
+    if _write_text("HTML", html_path, lambda: generate_html(report)):
+        written.append(("HTML", html_path))
+    if _write_text("JSON", json_path, lambda: generate_json(report)):
+        written.append(("JSON", json_path))
+
     pdf_path = None
     if args.pdf:
-        pdf_path = args.out_pdf or os.path.join(report_dir, "report.pdf")
-        ok = generate_pdf(report, pdf_path)
-        if not ok:
-            pdf_path = None
+        candidate = args.out_pdf or os.path.join(report_dir, "report.pdf")
+        try:
+            if generate_pdf(report, candidate):
+                pdf_path = candidate
+                written.append(("PDF", candidate))
+            else:
+                print(f"[warning] PDF generation skipped for {candidate} "
+                      "(WeasyPrint unavailable or rendering failed); HTML/MD/JSON are still available.",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"[error] failed to write PDF report to {candidate}: {e}", file=sys.stderr)
 
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(generate_markdown(report))
-    try:
-        hcontent = generate_html(report)
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(hcontent)
-    except Exception as e:
-        print(f"[error] failed to write HTML report: {e}", file=sys.stderr)
-        traceback.print_exc()
-    try:
-        with open(json_path, "w", encoding="utf-8") as f:
-            f.write(generate_json(report))
-    except Exception as e:
-        print(f"[error] failed to write JSON report: {e}", file=sys.stderr)
-
-    if not ci:
-        print(f"\nReports written:")
-        print(f"  Markdown : {md_path}")
-        print(f"  HTML     : {html_path}")
-        print(f"  JSON     : {json_path}")
-        if pdf_path:
-            print(f"  PDF      : {pdf_path}")
+    if written:
+        if not ci:
+            print("\nReports written:")
+            for label, path in written:
+                print(f"  {label:9}: {path}")
+    else:
+        print("[error] no report formats could be written", file=sys.stderr)
 
     return 0 if report.overall_status != CheckStatus.FAILED else 1
 
@@ -209,6 +267,10 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
     from webdoctor.server.app import app
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print("[warning] Binding to a non-loopback address exposes credentials submitted "
+              "to this dashboard. Use 127.0.0.1 unless you have secured access.",
+              file=sys.stderr)
     print(f"Starting WebDoctor dashboard at http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
@@ -221,9 +283,12 @@ def cmd_models(_args: argparse.Namespace) -> int:
     print("-" * 72)
     for m in models:
         print(f"{m['provider']:11} {m['id']:22} {m['label']}")
-    print("\nUse with: webdoctor check https://example.com --ai-model <id>")
-    print("Sandbox models (gpt-6-luna, gpt-6.1-sol, gemini-3.8-flash) are preconfigured.")
-    print("For Claude/Gemini direct, pass --ai-provider anthropic|gemini and --ai-key <KEY>.")
+    print("\nDefaults by provider (used when --ai-model is omitted):")
+    for provider in ("sandbox", "openai", "anthropic", "gemini"):
+        print(f"  {provider:11} {default_model_for_provider(provider)}")
+    print("\nUse with: webdoctor check https://example.com --ai-provider <provider> [--ai-model <id>]")
+    print("Without an API key, diagnosis falls back to the deterministic rule-based summary.")
+    print("For Claude/Gemini/OpenAI direct, pass --ai-provider and --ai-key (or set the provider's env var).")
     return 0
 
 
@@ -232,7 +297,10 @@ def cmd_login(args: argparse.Namespace) -> int:
     out = os.path.abspath(args.save_session)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     try:
-        record_session_headful(url, out)
+        validate_target_url(url, allow_private=getattr(args, "allow_private", False))
+        record_session_headful(
+            url, out, ignore_https_errors=getattr(args, "insecure", False)
+        )
         print(f"\nSaved session to: {out}")
         print(f"Now run authenticated tests with:")
         print(f"  webdoctor check \"{url}\" --session {out} --pdf")
@@ -278,30 +346,52 @@ def cmd_demo(args: argparse.Namespace) -> int:
     demo_url = f"http://127.0.0.1:{args.demo_port}"
     print(f"Broken demo site running at {demo_url}\nRunning WebDoctor diagnostics against it...\n")
 
-    check_args = argparse.Namespace(
-        url=demo_url, report_dir=args.report_dir, no_browser=False, no_links=False,
-        no_ai=args.no_ai, ai_provider="sandbox", ai_model=args.ai_model, ai_key=None, ai_base=None,
-        ai_compare=None, timeout=args.timeout, pdf=args.pdf, out_md=None, out_html=None,
-        out_json=None, out_pdf=None, ci=False, login=False, login_url=None, username=None,
-        password=None, user_field=None, pass_field=None, submit_btn=None, session=None,
-    )
+    # Build the check command through the real parser so new flags cannot break demo.
+    check_argv = ["check", demo_url, "--report-dir", args.report_dir,
+                  "--timeout", str(args.timeout), "--ai-provider", args.ai_provider,
+                  "--ai-model", args.ai_model]
+    if args.no_ai:
+        check_argv.append("--no-ai")
+    if args.pdf:
+        check_argv.append("--pdf")
+    if getattr(args, "monkey", False):
+        check_argv.extend([
+            "--monkey",
+            "--monkey-seed", str(args.monkey_seed),
+            "--monkey-actions", str(args.monkey_actions),
+            "--monkey-delay-ms", str(getattr(args, "monkey_delay_ms", MONKEY_DEFAULT_DELAY_MS)),
+        ])
+        if getattr(args, "monkey_no_navigation", False):
+            check_argv.append("--monkey-no-navigation")
+    check_args = build_parser().parse_args(check_argv)
     code = cmd_check(check_args)
     httpd.shutdown()
     return code
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="webdoctor", description="Automated website testing & root-cause diagnostics for developers.")
+    p = WebDoctorArgumentParser(prog="webdoctor", description="Automated website testing & root-cause diagnostics for developers.")
     p.add_argument("--version", action="version", version=f"WebDoctor {TOOL_VERSION}")
-    sub = p.add_subparsers(dest="command")
+    sub = p.add_subparsers(dest="command", parser_class=WebDoctorArgumentParser)
 
     c = sub.add_parser("check", help="Run full diagnostic suite against a URL")
     c.add_argument("url", help="Target URL (e.g. https://mysite.com or localhost:3000)")
     c.add_argument("--no-browser", action="store_true", help="Skip headless browser tests (HTTP/security/links/SEO only)")
+    c.add_argument("--monkey", action="store_true",
+                   help="Run the deterministic hard monkey test (seeded browser chaos; requires the browser suite)")
+    c.add_argument("--monkey-seed", type=int, default=MONKEY_DEFAULT_SEED,
+                   help=f"Monkey RNG seed for reproducibility (default: {MONKEY_DEFAULT_SEED})")
+    c.add_argument("--monkey-actions", type=int, default=MONKEY_DEFAULT_ACTIONS,
+                   help=f"Number of monkey actions (default: {MONKEY_DEFAULT_ACTIONS}, max 500)")
+    c.add_argument("--monkey-delay-ms", type=int, default=MONKEY_DEFAULT_DELAY_MS,
+                   help=f"Delay after each monkey action in ms (default: {MONKEY_DEFAULT_DELAY_MS})")
+    c.add_argument("--monkey-no-navigation", action="store_true",
+                   help="Block same-origin navigation during the monkey test (still no off-origin navigation)")
     c.add_argument("--no-links", action="store_true", help="Skip broken-link crawling")
     c.add_argument("--no-ai", action="store_true", help="Skip AI diagnosis; use rule-based summary only")
     c.add_argument("--ai-provider", default="sandbox", choices=["sandbox", "openai", "anthropic", "gemini"], help="AI provider (default: sandbox)")
-    c.add_argument("--ai-model", default=AI_MODEL_FAST, help=f"LLM model (default: {AI_MODEL_FAST}; see 'webdoctor models')")
+    c.add_argument("--ai-model", default=None,
+                   help="LLM model (default depends on --ai-provider; see 'webdoctor models')")
     c.add_argument("--ai-key", help="API key for anthropic/gemini/openai providers (or env ANTHROPIC_API_KEY/GEMINI_API_KEY)")
     c.add_argument("--ai-base", help="Custom OpenAI-compatible base URL")
     c.add_argument("--ai-compare", help="Compare multiple models: provider:model,provider:model")
@@ -321,7 +411,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--user-field", help="CSS selector of username input (auto-detected if omitted)")
     c.add_argument("--pass-field", help="CSS selector of password input (auto-detected if omitted)")
     c.add_argument("--submit-btn", help="CSS selector of submit button (auto-detected if omitted)")
+    c.add_argument("--login-success-selector", help="CSS selector that proves login succeeded (e.g. '.dashboard')")
     c.add_argument("--session", help="Path to saved Playwright storageState JSON (reuse logged-in session)")
+    c.add_argument("--allow-private", action="store_true",
+                   help="Permit scanning private/link-local IP addresses (only on networks you own)")
+    c.add_argument("--insecure", action="store_true",
+                   help="Ignore TLS certificate errors (only for sites you own and trust)")
 
     m = sub.add_parser("models", help="List available AI models and providers")
     m.set_defaults(func=cmd_models)
@@ -329,18 +424,29 @@ def build_parser() -> argparse.ArgumentParser:
     l = sub.add_parser("login", help="Open a visible browser, log in manually (2FA/SSO), and save the session")
     l.add_argument("url", help="Login URL")
     l.add_argument("--save-session", default="./session.json", help="Output path for the saved session (default: ./session.json)")
+    l.add_argument("--insecure", action="store_true", help="Ignore TLS certificate errors (only for sites you own)")
+    l.add_argument("--allow-private", action="store_true", help="Permit private/link-local login URLs")
 
     s = sub.add_parser("serve", help="Launch the interactive web dashboard")
-    s.add_argument("--host", default="0.0.0.0")
+    s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8080)
 
     d = sub.add_parser("demo", help="Run diagnostics against a built-in broken demo site")
     d.add_argument("--demo-port", type=int, default=8765)
     d.add_argument("--report-dir", default="./reports")
     d.add_argument("--no-ai", action="store_true")
-    d.add_argument("--ai-model", default=AI_MODEL_FAST)
+    d.add_argument("--ai-provider", default="sandbox",
+                   choices=["sandbox", "openai", "anthropic", "gemini"],
+                   help="AI provider for the demo (default: sandbox)")
+    d.add_argument("--ai-model", default=None,
+                   help="LLM model (default depends on --ai-provider)")
     d.add_argument("--timeout", type=int, default=20)
     d.add_argument("--pdf", action="store_true")
+    d.add_argument("--monkey", action="store_true", help="Also run the deterministic hard monkey test")
+    d.add_argument("--monkey-seed", type=int, default=MONKEY_DEFAULT_SEED)
+    d.add_argument("--monkey-actions", type=int, default=MONKEY_DEFAULT_ACTIONS)
+    d.add_argument("--monkey-delay-ms", type=int, default=MONKEY_DEFAULT_DELAY_MS)
+    d.add_argument("--monkey-no-navigation", action="store_true")
 
     return p
 

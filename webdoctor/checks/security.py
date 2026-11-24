@@ -7,18 +7,29 @@ from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT
 
 
-def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
+def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True) -> CheckResult:
     issues: List[Issue] = []
     headers_seen = {}
 
     req_headers = {"User-Agent": DEFAULT_USER_AGENT}
     try:
-        resp = requests.get(url, headers=req_headers, timeout=timeout, allow_redirects=True, verify=True)
+        resp = requests.get(url, headers=req_headers, timeout=timeout, allow_redirects=True, verify=verify)
     except Exception as e:
         return CheckResult(
             name="Security Headers",
             category="security",
             status=CheckStatus.SKIPPED,
+            issues=[Issue(
+                id="SEC_CHECK_SKIPPED",
+                category="security",
+                severity=Severity.WARNING,
+                title="Security Header Audit Could Not Run",
+                summary=f"The security header audit was skipped because the site could not be reached: {e}",
+                detail=str(e),
+                how_it_happened="The HTTP client could not fetch the target, so response headers could not be inspected. This is a blind spot, not a pass: the site may still be missing HSTS, CSP, and other hardening headers.",
+                reproduction=f"curl -sI '{url}' | head -20",
+                fix="Confirm the site is reachable, then rerun WebDoctor. If the site blocks automated clients, allow the tester's IP or provide a staging URL.",
+            )],
             notes=f"Skipped because the site could not be reached: {e}",
         )
 

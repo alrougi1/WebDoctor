@@ -10,7 +10,7 @@ from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT
 
 
-def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
+def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True) -> CheckResult:
     issues: List[Issue] = []
     metrics = {}
     start = time.perf_counter()
@@ -27,7 +27,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
     resp = None
     try:
         t0 = time.perf_counter()
-        resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True, verify=True)
+        resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True, verify=verify)
         response_time_ms = int((time.perf_counter() - t0) * 1000)
     except requests.exceptions.SSLError as e:
         response_time_ms = int((time.perf_counter() - start) * 1000)
