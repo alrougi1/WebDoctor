@@ -32,7 +32,7 @@ jobs:
       - name: Run diagnostics
         run: |
           webdoctor check "${{ github.event.inputs.url || 'https://your-site.com' }}" \
-            --full --no-ai --report-dir ./reports --ci
+            --no-ai --report-dir ./reports --ci
 
       - name: Upload HTML report
         if: always()

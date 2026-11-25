@@ -1,6 +1,8 @@
 """HTTP & network health checks: status, response time, SSL, redirects, compression."""
 from __future__ import annotations
 
+import re
+import shlex
 import time
 import requests
 from urllib.parse import urlparse
@@ -10,7 +12,22 @@ from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT
 
 
-def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)\b\s*[:=]\s*['\"]?[^'\"\s,;]+"
+)
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+
+
+def _redact(text: str) -> str:
+    """Remove common secret shapes before storing response evidence."""
+    out = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", text or "")
+    out = _JWT_RE.sub("[REDACTED_JWT]", out)
+    out = _EMAIL_RE.sub("[REDACTED_EMAIL]", out)
+    return out[:600]
+
+
+def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True) -> CheckResult:
     issues: List[Issue] = []
     metrics = {}
     start = time.perf_counter()
@@ -27,7 +44,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
     resp = None
     try:
         t0 = time.perf_counter()
-        resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True, verify=True)
+        resp = session.get(url, headers=headers, timeout=timeout, allow_redirects=True, verify=verify)
         response_time_ms = int((time.perf_counter() - t0) * 1000)
     except requests.exceptions.SSLError as e:
         response_time_ms = int((time.perf_counter() - start) * 1000)
@@ -94,8 +111,17 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
     metrics = {
         "status_code": status_code,
         "response_time_ms": response_time_ms,
+        "total_response_ms": response_time_ms,
         "final_url": resp.url,
         "redirect_count": len(resp.history),
+        "redirect_chain": [
+            {
+                "status": hop.status_code,
+                "url": hop.url,
+                "location": hop.headers.get("Location", ""),
+            }
+            for hop in resp.history
+        ],
         "content_length": len(resp.content),
         "content_type": resp.headers.get("Content-Type", ""),
         "encoding": resp.encoding,
@@ -112,20 +138,23 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
             summary=f"The server returned an internal error response (HTTP {status_code}).",
             detail=f"Status: {status_code} ({resp.reason}). Final URL: {resp.url}.",
             how_it_happened=_explain_5xx(status_code),
-            reproduction=f"curl -i '{url}'",
+            reproduction=f"curl -i {shlex.quote(url)}",
             fix=_fix_5xx(status_code),
-            evidence=(resp.text[:600] if "text/html" in resp.headers.get("Content-Type", "") else None),
+            evidence=(_redact(resp.text) if "text/html" in resp.headers.get("Content-Type", "") else None),
         ))
     elif status_code >= 400:
+        # 401/403 can be a normal auth challenge or bot/WAF response. They are
+        # worth reporting, but they are not automatically a site defect.
+        sev = Severity.WARNING if status_code in (401, 403) else Severity.ERROR
         issues.append(Issue(
             id="HTTP_4XX",
             category="http",
-            severity=Severity.ERROR,
+            severity=sev,
             title=f"Client Error {status_code} ({resp.reason})",
             summary=f"The URL returned an error response (HTTP {status_code}).",
             detail=f"Status: {status_code} ({resp.reason}). Final URL: {resp.url}.",
             how_it_happened=_explain_4xx(status_code),
-            reproduction=f"curl -i '{url}'",
+            reproduction=f"curl -i {shlex.quote(url)}",
             fix=_fix_4xx(status_code),
         ))
 
@@ -135,11 +164,11 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
             id="HTTP_SLOW_RESPONSE",
             category="http",
             severity=Severity.WARNING if response_time_ms < 6000 else Severity.ERROR,
-            title=f"Slow Server Response Time ({response_time_ms} ms)",
-            summary=f"The origin took {response_time_ms} ms to return the first response.",
-            detail=f"Response time: {response_time_ms} ms (recommended: < 600 ms).",
-            how_it_happened="The delay occurs between the client completing its request and the server fully returning the response. This includes server think time, database lookups, rendering, and content transfer. A slow origin severely impacts Core Web Vitals (TTFB).",
-            reproduction=f"curl -w 'TTFB: %{{time_starttransfer}}s | Total: %{{time_total}}s\\n' -o /dev/null -s '{url}'",
+            title=f"Slow Total Response Time ({response_time_ms} ms)",
+            summary=f"The full HTTP response took {response_time_ms} ms to download.",
+            detail=f"Total response time: {response_time_ms} ms. Use the browser waterfall TTFB value for first-byte timing.",
+            how_it_happened="This measures the complete request, including server think time and body transfer. It is not TTFB; the browser suite reports TTFB separately from the Navigation Timing API.",
+            reproduction=f"curl -w 'TTFB: %{{time_starttransfer}}s | Total: %{{time_total}}s\\n' -o /dev/null -s {shlex.quote(url)}",
             fix="Enable server-side page caching or a CDN (Cloudflare, Fastly), optimize database queries and ORM calls, implement gzip/brotli compression, and reduce payload size.",
         ))
 

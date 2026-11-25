@@ -40,11 +40,27 @@ def generate_rule_summary(report: TestReport) -> str:
     warn = counts["warning"]
 
     lines = []
-    if crit == 0 and err == 0 and warn == 0:
-        lines.append(
-            f"**Site health: excellent.** All automated checks passed for `{report.url}`. "
-            f"The site responded with grade {report.overall_grade} (score {report.score}/100) and no issues were detected."
+    env_note = ""
+    if report.environment_issues:
+        count = len(report.environment_issues)
+        noun = "note" if count == 1 else "notes"
+        env_note = (
+            f"**Runner {noun}: {count} not scored.** These were tester/environment "
+            "failures (for example a browser or HTML-fetch error), not defects in the target site."
         )
+
+    if crit == 0 and err == 0 and warn == 0:
+        headline = (
+            "**Site health: excellent.** No site defects were detected"
+            if env_note else
+            f"**Site health: excellent.** All automated checks passed for `{report.url}`"
+        )
+        lines.append(
+            f"{headline}. The site responded with grade {report.overall_grade} "
+            f"(score {report.score}/100)."
+        )
+        if env_note:
+            lines.append(env_note)
         return "\n\n".join(lines)
 
     lines.append(
@@ -67,4 +83,6 @@ def generate_rule_summary(report: TestReport) -> str:
             ". Each issue below includes a root-cause explanation ('how it happened') and exact reproduction commands."
         )
 
+    if env_note:
+        lines.append(env_note)
     return "\n\n".join(lines)

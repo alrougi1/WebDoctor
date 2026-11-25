@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebDoctor -- Website Testing & Root-Cause Diagnostics</title>
+<link rel="stylesheet" href="/static/dashboard.css"></head><body>
+<div class="wrap">
+<header>
+<div class="brand-center">
+<div class="logo"><img class="brand-mark" src="/static/webdoctor-emblem.svg" alt="WebDoctor emblem"><span>WebDoctor</span></div>
+<div class="sub">Automated website testing + root-cause diagnostics with multiple AI providers</div>
+</div>
+<div class="sub version">v{{ tool_version }}</div>
+</header>
+
+<div class="box">
+<form id="f">
+<div class="row">
+<input class="url" id="u" type="text" placeholder="https://your-site.com" required value="https://example.com">
+<button id="go" type="submit">Run Diagnosis</button>
+</div>
+<div class="row" style="margin-top:12px">
+<label class="chk"><input type="checkbox" id="cb_b" checked> Headless browser (JS errors & perf)</label>
+<label class="chk"><input type="checkbox" id="cb_monkey"> Hard monkey test (seeded browser chaos)</label>
+<label class="chk"><input type="checkbox" id="cb_l" checked> Crawl broken links</label>
+<label class="chk"><input type="checkbox" id="cb_ai" checked> AI root-cause diagnosis</label>
+<label class="chk"><input type="checkbox" id="cb_pdf" checked> Generate PDF</label>
+</div>
+
+<div class="details">
+<details>
+<summary>Hard monkey test options (deterministic browser chaos)</summary>
+<div style="margin-top:10px">
+<div class="row">
+<label class="chk">Seed <input type="number" id="monkey_seed" value="20261124" style="width:150px"></label>
+<label class="chk">Actions <input type="number" id="monkey_actions" value="200" min="1" max="500" style="width:110px"></label>
+<label class="chk">Delay ms <input type="number" id="monkey_delay" value="60" min="0" max="5000" style="width:110px"></label>
+<label class="chk"><input type="checkbox" id="monkey_nav" checked> Allow same-origin navigation</label>
+</div>
+<div class="modelnote">Safe by default: form submits, write requests, destructive controls, downloads and off-origin navigation are always blocked. The seed makes every action plan reproducible; the full trace appears in the report.</div>
+</div>
+</details>
+
+<details>
+<summary>AI provider & model (ChatGPT / Gemini / Claude / comparison)</summary>
+<div style="margin-top:10px">
+<div class="row">
+<select id="ai_p" onchange="onProvChange()">
+<option value="sandbox" selected>Sandbox built-in (OpenAI-compatible) -- free/cheap</option>
+<option value="openai">OpenAI direct (api.openai.com) -- your key</option>
+<option value="anthropic">Anthropic Claude -- your key</option>
+<option value="gemini">Google Gemini direct -- your key</option>
+</select>
+<select id="ai_m" style="min-width:260px"></select>
+<label class="chk"><input type="checkbox" id="cb_cmp"> Multi-AI compare (GPT-6 Luna + Gemini 3.8 Flash together)</label>
+</div>
+<div class="row" style="margin-top:8px">
+<input type="password" id="ai_k" placeholder="API key (optional; without one a rule-based summary is used)" style="flex:1">
+</div>
+<div class="modelnote">Tip: leave defaults for a verified model. Without an API key WebDoctor uses the deterministic rule-based summary; custom AI base URLs are intentionally not accepted by the dashboard.</div>
+</div>
+</details>
+
+<details style="margin-top:10px">
+<summary>Log in and test as a real user (authenticated testing)</summary>
+<div style="margin-top:10px">
+<label class="chk"><input type="checkbox" id="cb_login"> Enable login before tests (fills credentials, then runs all checks inside the protected area)</label>
+<div class="row" style="margin-top:8px">
+<input type="text" id="login_url" placeholder="Login page URL (leave blank = same as target)" style="flex:1">
+<input type="text" id="login_u" placeholder="Username / email" style="width:230px">
+<input type="password" id="login_p" placeholder="Password" style="width:190px">
+<button type="button" class="sec" onclick="testLogin()">Verify login</button>
+</div>
+<div id="login_msg" style="margin-top:6px"></div>
+<div style="margin-top:10px"><span class="sub">Or reuse a saved session (paste Playwright storageState JSON):</span></div>
+<textarea id="sess_json" rows="3" style="width:100%;margin-top:6px;font-family:monospace;font-size:11px" placeholder="{&quot;cookies&quot;: [...], &quot;origins&quot;: [...]}"></textarea>
+<div class="modelnote">Sessions are saved per-run at reports/<id>/storage_state.json for reuse.</div>
+</div>
+</details>
+</div>
+</form>
+
+<div id="prog" style="display:none;margin-top:16px">
+<div class="pmsg" id="pmsg">Starting...</div>
+<div class="pbar"><div class="pfill" id="pfill"></div></div>
+</div>
+</div>
+
+<div class="hero box" id="hero">
+<div class="grade" id="gradecard"><div class="big" id="gbig">A</div><div class="sub" id="gsub">100/100</div></div>
+<div>
+<div class="row"><strong id="rurl" style="font-size:17px"></strong><span id="authbadge"></span></div>
+<div class="stats">
+<div class="stat"><div class="n" id="scrit" style="color:#ef4444">0</div><div class="l">Critical</div></div>
+<div class="stat"><div class="n" id="serror" style="color:#f97316">0</div><div class="l">Errors</div></div>
+<div class="stat"><div class="n" id="swarn" style="color:#eab308">0</div><div class="l">Warnings</div></div>
+<div class="stat"><div class="n" id="sinfo" style="color:#64748b">0</div><div class="l">Info</div></div>
+<div class="stat"><div class="n" id="sjs">0</div><div class="l">JS Errors</div></div>
+<div class="stat"><div class="n" id="smonkey">0</div><div class="l">Monkey Actions</div></div>
+<div class="stat"><div class="n" id="sdur">0s</div><div class="l">Duration</div></div>
+</div>
+<div class="toolbar" id="exportbar">
+<button type="button" class="sec export-btn" data-fmt="html" id="dl_html">Download HTML</button>
+<button type="button" class="sec export-btn" data-fmt="md" id="dl_md">Download Markdown</button>
+<button type="button" class="sec export-btn" data-fmt="json" id="dl_json">Download JSON</button>
+<button type="button" class="sec export-btn" data-fmt="pdf" id="dl_pdf">Download PDF</button>
+</div>
+<div class="modelnote" id="exportmsg">Reports are saved as files when you click a format.</div>
+</div>
+</div>
+
+<div class="diag box" id="diag" style="display:none">
+<div style="display:flex;justify-content:space-between;align-items:center"><strong>Executive Diagnosis</strong><span class="sub" id="modelused"></span></div>
+<pre id="diagbody"></pre>
+</div>
+
+<div class="box" id="issuesbox" style="display:none">
+<div class="row" style="justify-content:space-between"><strong>Issues & Root Causes (<span id="icnt">0</span>)</strong><span class="sub">click an issue to expand root cause, reproduction, and fix</span></div>
+<div id="issuelist" style="margin-top:10px"></div>
+</div>
+
+<footer>WebDoctor -- Developer-first website testing with ChatGPT, Gemini, and Claude * Open source (MIT)</footer>
+</div>
+
+<script src="/static/dashboard.js" defer></script>
+</body></html>

@@ -1,0 +1,196 @@
+# Last Changes
+
+## 2026-11-24 — Phase 0: baseline and branch
+
+- Git state: branch `improvement/accuracy-pass` created from `main` at `6c9870012a772557232e09651503daa461962791` (clean tree).
+- Environment: Python 3.13.1; virtual environment created at `.venv`; dependency installation in progress.
+- Project changes so far: this log file only. No source code modified yet.
+- Verification: `git status --short --branch`, `git rev-parse HEAD`, `python --version` — all successful.
+
+## Format
+
+Each subsequent entry records: file(s), change and reason, exact verification command, result (PASS/FAIL).
+
+## 2026-11-24 — Phase 0: baseline verification
+
+- Files: `.venv/` (created, ignored by git).
+- Change: created virtual environment and installed project + `pytest`, `httpx`, `bleach`; installed Playwright Chromium.
+- Verification: `python -m pip install -e . pytest httpx bleach`, `python -m playwright install chromium` — PASS.
+- Verification: `python -m compileall -q webdoctor tests examples` — PASS (no output).
+
+## 2026-11-24 — Phase 1.1/1.3/1.4: dashboard secret leakage, URL validation, AI base
+
+- Files: `webdoctor/server/app.py`, `webdoctor/runner.py`, `webdoctor/cli.py`.
+- Change: added `_sanitize_request()`; `/api/progress` now returns a whitelist (status/percent/message/created/report) instead of the internal job dict containing passwords, API keys, and session JSON. Dashboard rejects custom `ai_base` and validates target URLs; `validate_target_url()` blocks private/link-local/metadata targets unless `--allow-private` is passed. `serve --host` defaults to `127.0.0.1` with a warning for non-loopback binds.
+- Reason: critical security findings from the scan (credential exposure, SSRF, unsafe defaults).
+- Verification: `python -m pytest -q tests/test_security_hardening.py` — 4 passed (includes secret-leak, private URL, custom base, and URL-validation tests).
+- Result: PASS.
+
+## 2026-11-24 — Phase 1.5: HTML report injection hardening
+
+- File: `webdoctor/reporters/html_report.py`.
+- Change: AI markdown is sanitized with `bleach` using an allowlist; embedded `reportData` JSON escapes `</` and uses `default=str`; copy buttons use `data-copy` + event listener instead of inline JavaScript; Markdown download link works when served from `/api/reports/<id>/html`.
+- Reason: reports can contain attacker-controlled issue text and AI output and are opened in a browser.
+- Verification: `python -m pytest -q tests/test_security_hardening.py::test_html_report_sanitizes_ai_markdown_and_embedded_json` — PASS.
+- Result: PASS.
+
+## 2026-11-24 — Phase 2.2 (partial): Windows-safe session path
+
+- File: `webdoctor/runner.py`.
+- Change: saved session falls back to `tempfile.gettempdir()` instead of hard-coded `/tmp` when `report_dir` is not supplied.
+- Verification: covered by code review; dedicated test planned in Phase 5.
+- Result: PASS (compile check).
+
+## 2026-11-24 — Phase 2.1/2.3/2.4/2.5/2.6/2.9 (partial): correctness defects
+
+- Files: `examples/github_action.yml`, `webdoctor/cli.py`, `webdoctor/runner.py`, `webdoctor/checks/http_check.py`, `webdoctor/checks/security.py`, `webdoctor/checks/links.py`, `webdoctor/checks/browser.py`, `webdoctor/checks/auth.py`, `webdoctor/server/app.py`.
+- Changes: removed nonexistent `--full` from the GitHub Action; demo now builds check arguments through `build_parser()`; unified TLS policy (verify by default, `--insecure` opt-in threaded through every fetch); `SEC_CHECK_SKIPPED` issue emitted when header audit cannot run; login success detected via auth cookie/token/URL change or optional `--login-success-selector` instead of a fragile URL heuristic; HEAD retry only for 405/501; added `links_found` / `links_truncated` metrics.
+- Reason: plan Phase 2 correctness defects and accuracy of status reporting.
+- Verification: `python -m pytest -q` — 26 passed before Phase 2.7; `python -m compileall -q webdoctor tests examples` — PASS.
+- Result: PASS.
+
+## 2026-11-24 — Phase 2.7: verified model catalog and provider-specific defaults
+
+- Files: `webdoctor/config.py`, `webdoctor/diagnostics/ai_adapters.py`, `webdoctor/diagnostics/ai_engine.py`, `webdoctor/cli.py`, `webdoctor/runner.py`, `webdoctor/server/app.py`, `tests/test_all.py`, `tests/test_ai_defaults.py` (new), `README.md`.
+- Changes: added per-provider defaults (`ai_adapters` catalog verified against official OpenAI/Anthropic/Gemini docs on 2026-11-24); removed retired/deprecated IDs (`claude-sonnet-4`, `gemini-2.5-*`, `gpt-4o`, `o3-mini`, etc.); parser resolves default model from selected provider via `WebDoctorArgumentParser`; runner/engine also resolve provider defaults; without credentials the tool now uses the rule-based summary with an explicit notice instead of attempting a doomed call; dashboard model picker is catalog-driven with verified defaults.
+- Reason: advertised IDs must be accurate and local installs must degrade clearly without API keys.
+- Verification: `python -m pytest -q` — 31 passed; `python -m compileall -q webdoctor tests examples` — PASS; model docs fetched from `platform.openai.com/docs/models.md`, `platform.claude.com/docs/en/models/overview.md`, `ai.google.dev/gemini-api/docs/models.md`.
+- Result: PASS.
+
+## 2026-11-24 — Phase 2.8/2.9/2.10: report writes, link semantics, overlay safety
+
+- Files: `webdoctor/cli.py`, `webdoctor/checks/links.py`, `webdoctor/checks/browser.py`, `README.md`, `tests/test_cli_reports.py` (new), `tests/test_links_behavior.py` (new), `tests/test_browser_overlays.py` (new).
+- Changes: each report format is rendered and written independently (PDF no longer blocks HTML/MD/JSON, failures report cleanly); HEAD 404s are no longer re-fetched with GET (only 405/501 are), truncation is exposed via `links_found`/`links_truncated`; overlay dismissal is limited to scoped dialog/consent selectors and skips form submit buttons; README states the 40-link cap.
+- Reason: plan Phase 2 accuracy/correctness items; avoid destructive clicks and misleading link results.
+- Verification: `python -m pytest -q` — 38 passed; focused tests for write failures, HEAD semantics and overlays all passed.
+- Result: PASS.
+
+## 2026-11-24 — Phase 3: scoring and report accuracy
+
+- Files: `webdoctor/models.py`, `tests/test_scoring.py` (new), `README.md`.
+- Changes: added stable root-cause fingerprints (cause category + normalized issue id + target URL) that collapse the same HTTP status/URL across HTTP, links and browser suites; retained every occurrence in `check_results`; capped scoring impact (critical uncapped, max 3 errors and 5 warnings per category, INFO never penalized); exported `score_breakdown` to JSON; documented the exact formula and corrected test-count / "consensus" wording in README.
+- Reason: avoid inflated penalty counts and make grades auditable.
+- Verification: `python -m pytest -q` — 42 passed, including 4 new scoring tests; `python -m compileall -q webdoctor tests examples` — PASS.
+- Result: PASS.
+
+## 2026-11-24 — Phase 4: dashboard architecture and reliability
+
+- Files: `webdoctor/server/app.py`, `webdoctor/server/templates/dashboard.html` (new), `webdoctor/server/static/dashboard.css` (new), `webdoctor/server/static/dashboard.js` (new), `webdoctor/runner.py`, `webdoctor/reporters/pdf_report.py`, `webdoctor/cli.py`, `webdoctor/config.py`, `webdoctor/version.py` (new), `webdoctor/__init__.py`, `pyproject.toml`, `tests/test_dashboard.py` (new), `tests/test_pdf_report.py` (new), `tests/test_security_hardening.py`.
+- Changes: extracted inline dashboard HTML/CSS/JS into Jinja2 template + static files (with a compatible `TemplateResponse` shim); job lifecycle now has monotonic timestamps, TTL pruning, a max-job cap, thread-safe updates, executor `add_done_callback` error logging, and path-traversal-protected report downloads; removed the dashboard `ai_base` input; `normalize_url` now rejects non-http(s) schemes; PDF generation uses only WeasyPrint and skips gracefully with a clear warning; version comes from package metadata with `webdoctor/version.py` as the single fallback source; added brotli and package-data declarations; switched to SPDX license metadata.
+- Reason: plan Phase 4 architecture/reliability items; a worker crash must never leave a job silently running.
+- Verification: `python -m pytest -q tests/test_dashboard.py tests/test_security_hardening.py` — 11 passed; `python -m pytest -q tests/test_pdf_report.py tests/test_cli_reports.py` — 5 passed; dashboard TestClient smoke (root/static/models/progress) PASS; `pip install -e .` PASS (no license warning after metadata update).
+- Result: PASS.
+
+## 2026-11-24 — Phase 5: tests and packaging
+
+- Files: `pyproject.toml`, `webdoctor/models.py`, `tests/test_all.py`, `.github/workflows/webdoctor-selfcheck.yml` (new), `README.md`.
+- Changes: added `dev` extra and `[tool.pytest.ini_options]`; legacy HTTP fixtures now use OS-assigned free ports and close their listening sockets; `TestReport.__test__ = False` removes pytest collection warnings; added a GitHub Actions self-check workflow running pytest, the legacy suite, compileall and `git diff --check`; README test count and PDF note updated.
+- Reason: avoid flaky fixed ports and make CI reproducible.
+- Verification: `python -m pytest -q` — 52 passed with zero warnings; `python tests/test_all.py` — 22/22 OK; `python -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only Git line-ending notices).
+- Result: PASS.
+
+## 2026-11-24 — Phase 6: final verification gates
+
+- Files: `README.md`, `webdoctor/server/templates/dashboard.html`, `last changes`.
+- Changes: documented CLI exit codes (`0` PASSED/WARN, `1` FAILED); escaped the quotes in the session JSON placeholder so the dashboard form parses correctly.
+- Verification (all gates from the plan):
+  1. `python -m pytest -q` — 52 passed, 0 warnings.
+  2. `python tests/test_all.py` — 22/22 OK, no resource warnings.
+  3. `python -m compileall -q webdoctor tests examples` — PASS.
+  4. `git diff --check` — PASS (only Git LF→CRLF notices).
+  5. `webdoctor models` — catalog matches README; defaults sandbox=`gpt-6-luna`, openai=`gpt-6.2-sol`, anthropic=`claude-sonnet-5-5`, gemini=`gemini-4-hydrogen`.
+  6. `webdoctor check https://example.com --no-ai --no-browser --ci` — exit 0 on retry (grade B/76); a transient first attempt returned exit 1 with a connection-failed issue, no traceback. Documented exit codes added to README.
+  7. `webdoctor demo --no-ai` — detected seeded faults (grade F/0), reports written.
+  8. Live dashboard smoke: uvicorn on `127.0.0.1` with an OS-assigned port; root + CSS + JS load, one diagnosis submitted with sentinel password/key/session, progress polled (sentinels absent), HTML (40802 bytes), MD (7142 bytes) and JSON (19051 bytes) downloaded.
+  9. `git status --short` reviewed: only intended source/test/doc files; no keys, sessions or generated reports staged; added-line secret scan clean.
+  10. This log updated after all gates.
+- Result: PASS. No commit was created (user has not requested one).
+
+## 2026-11-24 — Hard test on 5 live websites + HTML-fetch bug fix
+
+- Files: `webdoctor/runner.py`, `tests/test_html_fetch_failure.py` (new), `README.md`, `last changes`.
+- Change/bug found: the hard test against `https://www.python.org` exposed that a transient HTML fetch failure produced false `SEO_NO_TITLE`, `SEO_NO_META_DESCRIPTION`, `A11Y_NO_VIEWPORT`, `A11Y_NO_LANG` findings and `links_found=0` instead of admitting the suites could not run. `run_diagnostics()` now records a single `HTML_FETCH_FAILED` ERROR and marks the SEO/a11y and link suites SKIPPED when the document cannot be downloaded. Also removed a shadowing local `Issue`/`Severity` import in the login-failure branch that this path revealed.
+- Reason: findings must describe the site, not a network hiccup in the tester.
+- Verification: `python -m pytest -q tests/test_html_fetch_failure.py` — PASS; `python -m pytest -q` — 53 passed, 0 warnings.
+- Result: PASS.
+
+### Hard-test results (full browser + links suites, `--no-ai`)
+
+| Site | Exit | Score / Grade | Independent verification |
+|---|---|---|---|
+| `https://example.com` | 1 | 72 / C | 22/22 checks passed |
+| `https://www.python.org` | 1 | 73 / C | 22/22 checks passed |
+| `https://www.mozilla.org` | 0 | 100 / A | 22/22 checks passed |
+| `https://expired.badssl.com` | 1 | 70 / C | 11/11 checks passed (only `HTTP_SSL_ERROR`, deeper suites skipped) |
+| `https://httpbin.org/status/500` | 1 | 12 / F | 18/18 checks passed (`HTTP_5XX` detected) |
+
+- Independent checks (temp harness, no project files added): raw requests status/TLS/redirect/final URL comparison, expected security-header issues vs raw headers, expected SEO/a11y issues vs parsed HTML, independently counted links vs `links_found`/`links_checked`, broken-count vs `LINK_BROKEN` issues, score/penalty/grade arithmetic and de-duplication consistency, and report artifacts present.
+- Note: several first-pass runs hit transient connection resets from the network; WebDoctor now reports them honestly instead of inventing missing-tag findings. The table shows the cleanest of up to 4 attempts per site.
+- Final gates re-run after the fix: `pytest -q` 53 passed; `python -m compileall -q webdoctor tests examples` PASS; `git diff --check` PASS (line-ending notices only)."})
+
+## 2026-11-24 — Hard monkey test section (new capability)
+
+- Answer to user question: WebDoctor had **no monkey/fuzz/chaos test mode** before this change. The only prior "monkey" references were pytest `monkeypatch` fixtures and a `SurveyMonkey (surveys)` tracker signature. This entry adds a real deterministic monkey suite.
+- Files: `webdoctor/checks/monkey.py` (new), `webdoctor/config.py`, `webdoctor/runner.py`, `webdoctor/cli.py`, `webdoctor/reporters/markdown_report.py`, `webdoctor/reporters/html_report.py`, `webdoctor/server/app.py`, `webdoctor/server/templates/dashboard.html`, `webdoctor/server/static/dashboard.js`, `tests/test_monkey.py` (new), `README.md`, `last changes`.
+- Change: added `run_monkey_check()` with a seeded random planner (default seed `20261124`, default `200` actions, max `500`), a full action trace and a deterministic config fingerprint. Actions include safe clicks, harmless typing, scrolling, keyboard navigation and viewport changes. Safety guards always block form submits (including `form.submit()`/`requestSubmit()`), POST/PUT/PATCH/DELETE requests, downloads, destructive labels/URLs, password/file inputs, hidden/disabled controls, dangerous URL schemes and off-origin document navigation. Native dialogs are dismissed, never accepted; Enter is never pressed.
+- Findings: `MONKEY_PAGE_CRASH`, `MONKEY_JS_E<signature>`, `MONKEY_CONSOLE_E<signature>`, `MONKEY_BLANK_PAGE`, `MONKEY_DIALOG`, `MONKEY_OFF_ORIGIN_BLOCKED`, `MONKEY_SUBMIT_BLOCKED`, `MONKEY_MUTATION_BLOCKED`, `MONKEY_RUNNER_ERROR`, plus navigation/options failures. Browser-suite JS/console errors are deduplicated by normalized signature before issue creation so identical faults do not receive double penalties, while different errors keep distinct hashed IDs.
+- Integration: new keyword-only `monkey`, `monkey_seed`, `monkey_actions`, `monkey_delay_ms`, `monkey_navigation` parameters on `run_diagnostics()`. A skipped `Hard Monkey Test` suite is recorded when the site is unreachable or the browser suite is disabled. Monkey metrics are namespaced under `report.metrics["monkey"]` and `report.metrics["monkey_actions_executed"]` so browser metrics are never overwritten. `--monkey` is rejected with `--no-browser`. Both `check` and `demo` CLI parsers support the new flags; the dashboard exposes a checkbox, seed/actions/delay/navigation controls, a summary badge/stat and validated request fields. `/api/progress` still returns only the existing secret-free whitelist.
+- Reports: Markdown and HTML render a dedicated **Hard Monkey Test** section with seed, status, action counts, safety-block counters, run fingerprint and a per-step trace table. JSON carries all monkey data through `CheckResult.metrics`; PDF inherits the HTML section through WeasyPrint.
+- Reason: the user asked whether WebDoctor performs monkey testing and requested a hard/best monkey-test section if absent. The implementation is accuracy-first: reproducible seeds, bounded actions, no destructive side effects, no double-counted findings, and honest skipped/failed states.
+- Verification: `python -m pytest -q tests/test_monkey.py` — 12 passed; `python -m pytest -q` — 65 passed; `python tests/test_all.py` — 22 tests OK; `python -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only Git LF→CRLF notices).
+- Verification: `webdoctor models` — PASS; `webdoctor check https://example.com --no-ai --no-browser --ci` — grade B/76, WARN, exit 0; `webdoctor demo --no-ai` — seeded faults detected, grade F/0.
+- Verification: `webdoctor check https://example.com --monkey --monkey-seed 4242 --monkey-actions 25 --monkey-delay-ms 20 --no-ai --no-links --ci` — grade B/76; monkey 25/25 actions executed, trace length 25 in `report.json`, dedicated section present in HTML and Markdown.
+- Verification: `webdoctor demo --no-ai --monkey --monkey-actions 15 --monkey-delay-ms 20` — monkey suite PASSED; standard demo regression also PASS.
+- Verification: live dashboard smoke on an OS-assigned loopback port with sentinel password/API key/session JSON: root + CSS + JS + models load, `cb_monkey` present in JS, one monkey-enabled diagnosis completes, progress contains no sentinels, `monkey_summary` reports seed 99 and 8/8 actions, and HTML/MD/JSON downloads contain the monkey suite/section.
+- Verification: `git status --short` reviewed — only intended source, test, doc and changelog files; no keys, sessions or generated reports in the repository. Added-line secret scan clean (only pre-existing `sk-secret` test fixtures remain).
+- Result: PASS. Commit and push were requested by the user after this entry was written; this log is included in that commit.
+
+## 2026-11-24 — GitHub Actions failure: Python 3.11 f-string syntax
+
+- User report: GitHub showed a failed check on PR #1 / branch `improvement/accuracy-pass`. Public Actions run `45435356480` failed at step 5 (`python -m pytest -q`) with exit code 2; the Node.js 20 annotation was only a warning.
+- Root cause: `webdoctor/reporters/html_report.py` embedded `json.dumps(...).replace("</", "<\\/")` directly inside an f-string expression. Backslashes inside f-string expressions require Python 3.12+ (PEP 701), but the workflow runs Python 3.11 and `pyproject.toml` declares `requires-python = ">=3.9"`. Local verification used Python 3.13, so it did not expose the incompatibility.
+- Files: `webdoctor/reporters/html_report.py`, `last changes`.
+- Change: precompute `report_data_json = json.dumps(report.to_dict(), default=str).replace("</", "<\\/")` before the HTML template and interpolate `{report_data_json}`. This preserves the `</script>` breakout protection while keeping the module parseable by Python 3.9–3.11. The partially applied inline substitution in the working tree was completed rather than overwritten.
+- Reason: the committed CI configuration must pass on the Python version it declares/uses; accuracy-first verification requires catching version-specific syntax failures before release.
+- Verification: `ast.parse(..., feature_version=(3, 11))` across all 38 project `.py` files — PASS (`python 3.11 grammar PASS`).
+- Verification: `python -m pytest -q` — 65 passed; `python tests/test_all.py` — 22 tests OK; `python -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only the Git LF→CRLF notice).
+- Verification: existing `tests/test_security_hardening.py::test_html_report_sanitizes_ai_markdown_and_embedded_json` still passes, confirming `<\\/script>` escaping remains intact.
+- Result: PASS. Fix committed and pushed to `origin/improvement/accuracy-pass`; GitHub Actions will be re-run by that push.
+
+## 2026-11-25 — PDF output via Chromium fallback
+
+- User report: WebDoctor could not produce a PDF on this Windows machine. The earlier demo run skipped PDF with `cannot load library 'libgobject-2.0-0'`.
+- Root cause: WeasyPrint raises `OSError` during module import when its native Pango/cairo libraries are missing. The previous `generate_pdf()` caught only `ImportError` around that import, so the exception escaped to the CLI instead of reaching the graceful fallback/skip path.
+- Files: `webdoctor/reporters/pdf_report.py`, `tests/test_pdf_report.py`, `README.md`, `last changes`.
+- Changes: split rendering into `_render_with_weasyprint()` and `_render_with_chromium()`. WeasyPrint remains the preferred renderer; native import failures and render failures are both caught. If WeasyPrint cannot produce a non-empty file, WebDoctor now falls back to headless Playwright Chromium (`page.set_content()` + `page.emulate_media("print")` + `page.pdf()` A4 with 12 mm margins). PDF generation returns `False` only when neither renderer produces a non-empty file. The README report table was updated to describe the fallback; the README test count was updated from 65 to 68. Tests now cover missing WeasyPrint, native-library import failure, broken WeasyPrint render, working WeasyPrint, missing Chromium output, and successful Chromium fallback. (CLI warning text was corrected in the 2026-11-25 accuracy/theme entry below.)
+- Determinism note: byte-identical output remains guaranteed only for the WeasyPrint path; the Chromium fallback is best-effort and platform-dependent, but it renders the same HTML report content.
+- Verification: `python -m pytest -q tests/test_pdf_report.py` — 6 passed.
+- Verification: `python -m pytest -q` — 68 passed; `python tests/test_all.py` — 22 tests OK; `python -m compileall -q webdoctor tests examples` — PASS.
+- Verification: `ast.parse(..., feature_version=(3, 9/10/11))` across 38 project `.py` files — PASS for each version.
+- Verification: `webdoctor models` — PASS; local monkey dashboard smoke on an OS-assigned loopback port — PASS (seed 99, 12/12 actions, no sentinel secrets in progress).
+- Verification: `webdoctor demo --no-ai --pdf --monkey --monkey-seed 20261124 --monkey-actions 60 --monkey-delay-ms 5 --report-dir <temp>` — Chromium fallback engaged after WeasyPrint native-library failure; `report.pdf` written with 329017 bytes and `%PDF-1.4` header. Markdown, HTML and JSON reports also written. No generated reports were placed in the repository.
+- Verification: `git diff --check` — PASS (only Git LF→CRLF notices); manual diff review of the three changed files — PASS.
+- Result: PASS. No commit or push was requested for this change.
+
+## 2026-11-25 — Accuracy pass, dark crimson theme, and local dashboard
+
+- Files: `webdoctor/models.py`, `webdoctor/runner.py`, `webdoctor/checks/browser.py`, `webdoctor/checks/monkey.py`, `webdoctor/checks/security.py`, `webdoctor/checks/http_check.py`, `webdoctor/checks/links.py`, `webdoctor/diagnostics/rule_engine.py`, `webdoctor/reporters/html_report.py`, `webdoctor/reporters/markdown_report.py`, `webdoctor/server/app.py`, `webdoctor/server/static/dashboard.js`, `webdoctor/cli.py`, `webdoctor/server/static/dashboard.css`, `webdoctor/server/templates/dashboard.html`, `webdoctor/server/static/webdoctor-emblem.svg` (new), `pyproject.toml`, `README.md`, `tests/test_environment_issues.py` (new), `tests/test_security_accuracy.py` (new), `tests/test_http_accuracy.py` (new), `tests/test_theme.py` (new), `tests/test_html_fetch_failure.py`, `tests/test_links_behavior.py`, `last changes`.
+- Changes: runner/tester failures now carry `source="environment"` and are collected in `TestReport.environment_issues`; they stay visible in rule summaries, HTML/Markdown reports and the dashboard count but are excluded from scoring and from "all checks passed" claims. Security checks now validate HSTS `max-age`, treat CSP `frame-ancestors` as clickjacking protection, inspect the exact `Set-Cookie` header for `HttpOnly` and `SameSite`, and still flag weak/missing flags. HTTP findings classify 401/403 as warnings instead of automatic errors, label the measured value as total response time (not TTFB), expose a structured redirect chain, redact secret/email/JWT shapes from evidence, and use shell-quoted reproduction commands. Link checking confirms any HEAD failure with GET before calling a link broken. The PDF CLI warning now says "no renderer produced a file", matching the Chromium-fallback behaviour already recorded above.
+- Changes: the dashboard and standalone HTML reports use a near-black/crimson theme with an original hand-built SVG emblem (hooded guardian, red scarf, diagnostic blade). The emblem is inlined in standalone HTML reports and packaged via `server/static/*.svg`. The image generator failed with `Invalid credential`, so no copyrighted Akame artwork was copied; the emblem is an original crimson anime-inspired WebDoctor mark.
+- Reason: the user asked for accuracy where "100% means zero mistakes", so findings must describe the target site rather than browser/network hiccups, and the UI needed a darker anime-inspired identity. No active third-party scan was run; `openbsd.org` remains blocked pending explicit written permission or bug-bounty scope.
+- Verification: `.venv\Scripts\python.exe -m pytest -q` — 80 passed; `.venv\Scripts\python.exe tests\test_all.py` — 22 tests OK; `.venv\Scripts\python.exe -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only Git LF→CRLF notices); `.venv\Scripts\webdoctor.exe models` — PASS.
+- Verification: `ast.parse(..., feature_version=(3,9)/(3,10)/(3,11))` across 42 project `.py` files — PASS for all three grammars.
+- Verification: `webdoctor check https://example.com --no-ai --no-browser --no-links --ci` — grade B/76, WARN, exit 0; `webdoctor demo --no-ai --report-dir <temp>` — seeded faults detected (grade F/0) and HTML/MD/JSON written to the temp directory only.
+- Verification: local dashboard on `127.0.0.1:8765` with `WEBDOCTOR_REPORTS` pointed at a temp directory: root, CSS, JS, SVG emblem and `/api/models` all HTTP 200; one diagnosis job completed with sentinel password/API key/session absent from progress, `environment_issue_count` present, and the downloaded HTML containing the original emblem and dark theme.
+- Verification: manual diff review — PASS; `git status --short` reviewed — only intended source/test/doc files; leftover generated `reports/` from earlier smoke tests removed; no PDF files or generated reports in the repository.
+- Result: PASS. No commit or push was requested.
+
+## 2026-11-25 — Centered brand header and working report exports
+
+- Files: `webdoctor/server/templates/dashboard.html`, `webdoctor/server/static/dashboard.css`, `webdoctor/server/static/dashboard.js`, `tests/test_dashboard.py`, `tests/test_theme.py`, `README.md`, `last changes`.
+- Changes: the dashboard header now centers a much larger brand block (54px WebDoctor wordmark, 76px emblem, centered tagline, small version marker, responsive mobile sizes) for the requested Google-like layout. The report export controls are now real buttons instead of invalid `<a><button>` nesting with `target="_blank"`; each button fetches the report bytes and saves them through a Blob + `download` link, shows a clear success/error message, is disabled until a job finishes, and the PDF button is disabled with an explanation when PDF generation was unavailable. Report endpoints already return `Content-Disposition: attachment`, so all four formats download as files.
+- Reason: the user asked for a bigger centered logo/name and reported that reports could not be exported from the page.
+- Verification: `.venv\Scripts\python.exe -m pytest -q tests/test_dashboard.py tests/test_theme.py` — 11 passed; `.venv\Scripts\python.exe -m pytest -q` — 82 passed; `node --check webdoctor\server\static\dashboard.js` — PASS.
+- Verification: local dashboard restarted on `127.0.0.1:8765` with temp reports: centered header CSS/JS served, one completed job had `pdf_available=True`, and HTML/Markdown/JSON/PDF endpoints all returned HTTP 200 with 23,605 / 2,321 / 9,017 / 139,149 bytes. No generated reports were written inside the repository.
+- Verification: `python tests/test_all.py` — 22 tests OK; `python -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only Git LF→CRLF notices); `webdoctor models` — PASS; `ast.parse(..., feature_version=(3,9)/(3,10)/(3,11))` across 42 `.py` files — PASS.
+- Result: PASS. No commit or push was requested.

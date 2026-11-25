@@ -1,0 +1,29 @@
+name: WebDoctor self-check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m playwright install --with-deps chromium
+      - name: Unit and integration tests
+        run: python -m pytest -q
+      - name: Legacy suite
+        run: python tests/test_all.py
+      - name: Compile check
+        run: python -m compileall -q webdoctor tests examples
+      - name: Whitespace check
+        run: git diff --check

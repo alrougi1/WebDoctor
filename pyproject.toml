@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "webdoctor"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Automated website testing and root-cause diagnostics for developers"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "WebDoctor Team"}]
 dependencies = [
     "requests>=2.31",
+    "brotli>=1.1",
     "beautifulsoup4>=4.12",
     "playwright>=1.40",
     "fastapi>=0.110",
@@ -23,9 +25,21 @@ dependencies = [
     "weasyprint>=60.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov", "httpx", "bleach"]
+
 [project.scripts]
 webdoctor = "webdoctor.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "webdoctor.version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["webdoctor*"]
+
+[tool.setuptools.package-data]
+webdoctor = ["server/templates/*.html", "server/static/*.css", "server/static/*.js", "server/static/*.svg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

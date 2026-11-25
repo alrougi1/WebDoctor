@@ -1,6 +1,7 @@
 """Broken link & resource checker: crawls <a> and <img> references concurrently."""
 from __future__ import annotations
 
+import shlex
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -16,7 +17,7 @@ from webdoctor.config import (
 )
 
 
-def _collect_references(html: str, base_url: str) -> List[Dict[str, str]]:
+def _collect_references(html: str, base_url: str) -> Tuple[List[Dict[str, str]], int]:
     soup = BeautifulSoup(html, "html.parser")
     refs: Dict[str, Dict[str, str]] = {}
 
@@ -45,7 +46,8 @@ def _collect_references(html: str, base_url: str) -> List[Dict[str, str]]:
         if any(x in rel for x in ("stylesheet", "icon", "preload", "canonical")):
             add(link.get("href", ""), f"link[{rel}]", "")
 
-    return list(refs.values())[:MAX_LINKS_TO_CHECK]
+    all_refs = list(refs.values())
+    return all_refs[:MAX_LINKS_TO_CHECK], len(all_refs)
 
 
 def os_basename(u: str) -> str:
@@ -53,16 +55,18 @@ def os_basename(u: str) -> str:
     return path.rstrip("/").split("/")[-1] if path else u[:40]
 
 
-def _check_one(ref: Dict[str, str]) -> Dict[str, Any]:
+def _check_one(ref: Dict[str, str], verify: bool = True) -> Dict[str, Any]:
     url = ref["url"]
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     res: Dict[str, Any] = dict(ref)
     try:
         t0 = time.perf_counter()
-        r = requests.head(url, headers=headers, timeout=12, allow_redirects=True, verify=False)
-        if r.status_code in (405, 403) or (r.status_code >= 400 and r.status_code < 500):
-            # Many servers block HEAD; retry with GET streaming (headers only)
-            r = requests.get(url, headers=headers, timeout=12, allow_redirects=True, verify=False, stream=True)
+        r = requests.head(url, headers=headers, timeout=12, allow_redirects=True, verify=verify)
+        if r.status_code >= 400:
+            # Many servers answer HEAD with 403/404 even though GET works. Only
+            # classify the link as broken after the GET fallback also fails.
+            r = requests.get(url, headers=headers, timeout=12, allow_redirects=True,
+                             verify=verify, stream=True)
             r.close()
         res["status"] = r.status_code
         res["final_url"] = r.url
@@ -92,13 +96,13 @@ def _check_one(ref: Dict[str, str]) -> Dict[str, Any]:
     return res
 
 
-def run_links_check(url: str, html: str) -> CheckResult:
+def run_links_check(url: str, html: str, verify: bool = True) -> CheckResult:
     start = time.perf_counter()
-    refs = _collect_references(html, url)
+    refs, total_refs = _collect_references(html, url)
     results: List[Dict[str, Any]] = []
 
     with ThreadPoolExecutor(max_workers=LINK_CHECK_CONCURRENCY) as ex:
-        futs = [ex.submit(_check_one, r) for r in refs]
+        futs = [ex.submit(_check_one, r, verify) for r in refs]
         for fut in as_completed(futs):
             try:
                 results.append(fut.result())
@@ -124,7 +128,7 @@ def run_links_check(url: str, html: str) -> CheckResult:
             summary=f"The link{link_text} on this page returns {f'HTTP {status}' if status else err}.",
             detail=f"Source tag: <{ref_kind}> | Link text: '{r.get('text','')}'\nTarget: {r['url']}\nResult: status={status}, error={err}",
             how_it_happened=_explain_link_failure(status, err, r["url"]),
-            reproduction=f"curl -sI -o /dev/null -w 'HTTP %{{http_code}}\\n' '{r['url']}'",
+            reproduction=f"curl -sI -o /dev/null -w 'HTTP %{{http_code}}\\n' {shlex.quote(r['url'])}",
             fix=_fix_link(status, r["url"], ref_kind),
         ))
 
@@ -132,6 +136,8 @@ def run_links_check(url: str, html: str) -> CheckResult:
     broken_count = len(broken)
     metrics = {
         "links_checked": checked,
+        "links_found": total_refs,
+        "links_truncated": total_refs > checked,
         "broken_count": broken_count,
         "broken_percent": round(100 * broken_count / max(checked, 1), 1),
     }

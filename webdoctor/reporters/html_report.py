@@ -6,23 +6,38 @@ import html as html_escape
 import json
 import os
 import re
+from pathlib import Path
 from typing import Optional
 from webdoctor.models import TestReport, Severity, CheckStatus
 
 
 GRADE_COLORS = {
-    "A": ("#10b981", "#059669"),
-    "B": ("#3b82f6", "#2563eb"),
-    "C": ("#f59e0b", "#d97706"),
-    "D": ("#f97316", "#ea580c"),
-    "F": ("#ef4444", "#dc2626"),
+    "A": ("#22c55e", "#0f7a3d"),
+    "B": ("#38bdf8", "#0369a1"),
+    "C": ("#f59e0b", "#b45309"),
+    "D": ("#fb923c", "#c2410c"),
+    "F": ("#ff2d55", "#8b0018"),
 }
 
 SEV_COLORS = {
-    Severity.CRITICAL: ("#ef4444", "#fee2e2"),
-    Severity.ERROR:    ("#f97316", "#ffedd5"),
+    Severity.CRITICAL: ("#ff2d55", "#3b0a14"),
+    Severity.ERROR:    ("#fb923c", "#431507"),
     Severity.WARNING:  ("#f59e0b", "#fef3c7"),
     Severity.INFO:     ("#64748b", "#f1f5f9"),
+}
+
+# Allowlist used for AI-generated markdown before it is embedded in the report.
+ALLOWED_HTML_TAGS = [
+    "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "strong", "em", "b", "i",
+    "ul", "ol", "li", "code", "pre", "blockquote", "a", "table", "thead", "tbody",
+    "tr", "th", "td", "span", "div",
+]
+ALLOWED_HTML_ATTRS = {
+    "a": ["href", "title"],
+    "code": ["class"],
+    "pre": ["class"],
+    "span": ["class"],
+    "div": ["class"],
 }
 
 
@@ -30,13 +45,29 @@ def _esc(s: Optional[str]) -> str:
     return html_escape.escape(str(s or ""), quote=True)
 
 
+def _emblem_svg() -> str:
+    """Inline the original crimson WebDoctor emblem so reports stay standalone."""
+    path = Path(__file__).resolve().parents[1] / "server" / "static" / "webdoctor-emblem.svg"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def _md_to_html(md: str) -> str:
-    """Lightweight markdown -> HTML converter (safe, no external dependency required)."""
+    """Markdown -> HTML converter. AI output is sanitized before embedding."""
     if not md:
         return ""
     try:
         import markdown as mdlib
-        return mdlib.markdown(md, extensions=["fenced_code", "tables"])
+        import bleach
+        rendered = mdlib.markdown(md, extensions=["fenced_code", "tables"])
+        return bleach.clean(
+            rendered,
+            tags=ALLOWED_HTML_TAGS,
+            attributes=ALLOWED_HTML_ATTRS,
+            strip=True,
+        )
     except Exception:
         pass
     # Fallback basic conversion
@@ -62,6 +93,92 @@ def _screenshot_data_uri(path: Optional[str]) -> Optional[str]:
         return None
 
 
+def _monkey_section(report: TestReport) -> str:
+    """Render the deterministic monkey-test trace as its own report section."""
+    monkey = next((cr for cr in report.check_results if cr.category == "monkey"), None)
+    if monkey is None:
+        return ""
+    mm = monkey.metrics or {}
+    if monkey.status == CheckStatus.SKIPPED:
+        return (
+            '<section class="sec"><h2>Hard Monkey Test</h2>'
+            f'<div class="empty">Skipped ({_esc(mm.get("skipped_reason", "not run"))}).</div></section>'
+        )
+
+    rows = []
+    for step in (mm.get("trace") or [])[:50]:
+        target = (step.get("selector") or step.get("key") or
+                  (f"scroll dy={step.get('dy')}" if step.get("dy") is not None else
+                   f"viewport {step.get('width')}x{step.get('height')}" if step.get("width") else "window"))
+        rows.append(
+            "<tr><td>" + _esc(step.get("step", "")) + "</td><td>" + _esc(step.get("type", "")) +
+            "</td><td><code>" + _esc(target) + "</code></td><td>" + _esc(step.get("result", "")) +
+            "</td><td>" + _esc(step.get("url", "")) + "</td></tr>"
+        )
+    trace_html = "".join(rows) or "<tr><td colspan='5'>No actions were executed.</td></tr>"
+    offsite = mm.get("off_origin_navigation_attempts") or []
+    stats = [
+        ("Seed", mm.get("seed", "n/a")),
+        ("Actions", f"{mm.get('actions_executed', 0)}/{mm.get('planned_actions', 0)} executed"),
+        ("Skipped", mm.get("actions_skipped", 0)),
+        ("JS errors", mm.get("js_error_count", 0)),
+        ("Console errors", mm.get("console_error_count", 0)),
+        ("Dialogs", mm.get("dialog_count", 0)),
+        ("Crashes", mm.get("page_crash_count", 0)),
+        ("Blocked submits", mm.get("blocked_submit_count", 0)),
+        ("Blocked writes", mm.get("blocked_mutation_count", 0)),
+        ("Off-origin blocked", len(offsite)),
+    ]
+    stat_cards = "".join(
+        f'<div class="stat"><div class="stat-k">{_esc(label)}</div>'
+        f'<div class="stat-v">{_esc(value)}</div></div>' for label, value in stats
+    )
+    fingerprint = mm.get("config_fingerprint")
+    fingerprint_html = (
+        f'<p class="sub">Run fingerprint: <code>{_esc(fingerprint)}</code> — '
+        'the same seed and options produce the same action plan.</p>' if fingerprint else ""
+    )
+    return f"""
+<section class="sec">
+  <h2>Hard Monkey Test — Deterministic Browser Chaos</h2>
+  <div class="diag-box">
+    <div class="stats-grid">{stat_cards}</div>
+    {fingerprint_html}
+  </div>
+  <details style="margin-top:12px">
+    <summary><strong>Action trace ({len(mm.get('trace') or [])} steps)</strong></summary>
+    <table style="margin-top:10px">
+      <thead><tr><th>Step</th><th>Action</th><th>Target</th><th>Result</th><th>URL</th></tr></thead>
+      <tbody>{trace_html}</tbody>
+    </table>
+  </details>
+</section>"""
+
+
+def _environment_section(report: TestReport) -> str:
+    """Show runner/environment notes without mixing them into scored findings."""
+    notes = getattr(report, "environment_issues", None) or []
+    if not notes:
+        return ""
+    rows = "".join(
+        "<tr><td>" + _esc(n.category) + "</td><td>" + _esc(n.title) + "</td><td>"
+        + _esc(n.summary) + "</td></tr>"
+        for n in notes[:20]
+    )
+    return f"""
+<section class="sec">
+  <h2>Runner Notes (not scored)</h2>
+  <div class="diag-box">
+    <p>These entries describe tester/environment failures. They are shown for
+    transparency but do not lower the site grade.</p>
+    <table style="margin-top:10px">
+      <thead><tr><th>Category</th><th>Note</th><th>Detail</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</section>"""
+
+
 def generate_html(report: TestReport) -> str:
     counts = report.issue_counts()
     grade = report.overall_grade
@@ -70,6 +187,9 @@ def generate_html(report: TestReport) -> str:
     m = report.metrics
     ss_uri = _screenshot_data_uri(report.screenshot_path)
     ai_html = _md_to_html(report.ai_summary or "")
+    # Python 3.11 rejects backslashes inside f-string expressions (PEP 701 is
+    # 3.12+), so escape the embedded JSON outside the template literal.
+    report_data_json = json.dumps(report.to_dict(), default=str).replace("</", "<\\/")
 
     # Issue cards
     cards = []
@@ -89,7 +209,7 @@ def generate_html(report: TestReport) -> str:
           <div class="issue-drawer">
             {f'<div class="box detail-box"><strong>Technical detail</strong><pre>{detail_lines}</pre></div>' if it.detail else ''}
             {f'<div class="box how-box"><strong>How the error happened</strong><p>{_esc(it.how_it_happened)}</p></div>' if it.how_it_happened else ''}
-            {f'<div class="box repro-box"><strong>Reproduction</strong><code>{_esc(it.reproduction)}</code><button class="copy-btn" onclick="navigator.clipboard.writeText({json.dumps(it.reproduction)});this.innerText=\'Copied!\';setTimeout(()=>this.innerText=\'Copy\',1500)">Copy</button></div>' if it.reproduction else ''}
+            {f'<div class="box repro-box"><strong>Reproduction</strong><code>{_esc(it.reproduction)}</code><button class="copy-btn" data-copy="{_esc(it.reproduction)}">Copy</button></div>' if it.reproduction else ''}
             {f'<div class="box fix-box"><strong>Recommended fix</strong><p>{_esc(it.fix)}</p></div>' if it.fix else ''}
           </div>
         </article>""")
@@ -130,11 +250,14 @@ def generate_html(report: TestReport) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WebDoctor Report — {_esc(report.url)}</title>
 <style>
-:root{{--bg:#0b0f19;--card:#121a2b;--card2:#172238;--txt:#e2e8f0;--mut:#94a3b8;--border:#1f2f4f;--accent:#6366f1;--grad1:{c1};--grad2:{c2}}}
-*{{box-sizing:border-box}} body{{margin:0;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}}
-a{{color:#a5b4fc}} .wrap{{max-width:1160px;margin:0 auto;padding:28px 18px 80px}}
-header{{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;border-bottom:1px solid var(--border);padding-bottom:18px}}
-.logo{{font-size:24px;font-weight:800;letter-spacing:-.5px}} .logo span{{color:var(--grad1)}}
+:root{{--bg:#040407;--card:#090b12;--card2:#11131c;--txt:#f5f6fa;--mut:#9aa3b6;--border:#2a111a;--accent:#ff2d55;--grad1:{c1};--grad2:{c2}}}
+*{{box-sizing:border-box}} body{{margin:0;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--txt);
+  background:radial-gradient(900px 520px at 10% -10%,rgba(255,45,85,.10),transparent 60%),radial-gradient(760px 460px at 100% 0%,rgba(139,0,24,.10),transparent 55%),var(--bg)}}
+a{{color:#ff8098}} .wrap{{max-width:1160px;margin:0 auto;padding:28px 18px 80px}}
+header{{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;border-bottom:1px solid var(--border);padding-bottom:18px;position:relative}}
+header:after{{content:"";position:absolute;left:0;bottom:-1px;width:120px;height:2px;background:linear-gradient(90deg,var(--accent),transparent)}}
+.logo{{display:flex;align-items:center;gap:10px;font-size:24px;font-weight:800;letter-spacing:-.5px}} .logo span{{color:var(--grad1)}}
+.brand-mark svg{{width:36px;height:36px;display:block;filter:drop-shadow(0 0 10px rgba(255,45,85,.35))}}
 .meta{{color:var(--mut);font-size:13px}}
 .hero{{display:grid;grid-template-columns:220px 1fr;gap:20px;margin-top:24px;background:linear-gradient(135deg,rgba(99,102,241,.12),transparent 70%);border:1px solid var(--border);border-radius:18px;padding:22px}}
 .grade-card{{display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--grad1),var(--grad2));border-radius:14px;color:#fff;padding:22px;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.35)}}
@@ -188,7 +311,7 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
 <div class="wrap">
 <header>
   <div>
-    <div class="logo"><span>&#9670;</span> WebDoctor</div>
+    <div class="logo"><span class="brand-mark">{_emblem_svg()}</span><span>WebDoctor</span></div>
     <div class="meta">Automated website testing &amp; root-cause diagnostics</div>
   </div>
   <div class="meta" style="text-align:right">
@@ -230,6 +353,8 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
   <div id="issues">{issues_html}</div>
 </section>
 
+{_environment_section(report)}
+
 <section class="sec">
   <h2>Check Suites</h2>
   <table>
@@ -238,6 +363,8 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
   </table>
 </section>
 
+{_monkey_section(report)}
+
 {f'<section class="sec"><h2>Page Timing Waterfall</h2>{timing_html}</section>' if tvals else ''}
 
 {f'<section class="sec"><h2>Visual Evidence</h2><img class="shot" src="{ss_uri}" alt="Full page screenshot"></section>' if ss_uri else ''}
@@ -245,14 +372,14 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
 <div class="toolbar">
   <button class="btn" onclick="window.print()">Print / Save PDF</button>
   <button class="btn sec" onclick="downloadJSON()">Download JSON</button>
-  <a class="btn sec" href="report.md" download>Download Markdown</a>
+  <a class="btn sec" id="dl_md_report" href="report.md" download>Download Markdown</a>
 </div>
 
 <footer>Generated by WebDoctor &bull; The developer-first website testing &amp; diagnostics toolkit</footer>
 </div>
 
 <script>
-const reportData = {json.dumps(report.to_dict())};
+const reportData = {report_data_json};
 function downloadJSON(){{
   const b=new Blob([JSON.stringify(reportData,null,2)],{{type:'application/json'}});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='webdoctor-report.json';a.click();
@@ -268,6 +395,15 @@ document.getElementById('expAll').onclick=function(){{
   document.querySelectorAll('.issue-card').forEach(it=>it.classList.toggle('open',expanded));
   this.innerText=expanded?'Collapse all':'Expand all';
 }};
+document.querySelectorAll('.copy-btn').forEach(b=>b.onclick=()=>{{
+  navigator.clipboard.writeText(b.dataset.copy||'');
+  const old=b.innerText; b.innerText='Copied!';
+  setTimeout(()=>{{b.innerText=old;}},1500);
+}});
+// When served by the dashboard, report files live at /api/reports/<id>/<fmt>.
+if(location.pathname.startsWith('/api/reports/')){{
+  document.getElementById('dl_md_report').href='md';
+}}
 </script>
 </body>
 </html>"""

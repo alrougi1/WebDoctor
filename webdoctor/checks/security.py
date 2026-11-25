@@ -1,24 +1,50 @@
 """Security headers & cookie flags check."""
 from __future__ import annotations
 
+import re
 import requests
 from typing import List
 from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT
 
 
-def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
+def _set_cookie_for(name: str, raw_cookies: List[str]) -> str:
+    """Return the raw Set-Cookie header that belongs to ``name``."""
+    for raw in raw_cookies:
+        first = raw.split(";", 1)[0].strip()
+        if first.startswith(f"{name}="):
+            return raw
+    return ""
+
+
+def _has_attr(raw_cookie: str, pattern: str) -> bool:
+    return bool(raw_cookie) and bool(re.search(pattern, raw_cookie, re.IGNORECASE))
+
+
+def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True) -> CheckResult:
     issues: List[Issue] = []
     headers_seen = {}
 
     req_headers = {"User-Agent": DEFAULT_USER_AGENT}
     try:
-        resp = requests.get(url, headers=req_headers, timeout=timeout, allow_redirects=True, verify=True)
+        resp = requests.get(url, headers=req_headers, timeout=timeout, allow_redirects=True, verify=verify)
     except Exception as e:
         return CheckResult(
             name="Security Headers",
             category="security",
             status=CheckStatus.SKIPPED,
+            issues=[Issue(
+                id="SEC_CHECK_SKIPPED",
+                category="security",
+                severity=Severity.WARNING,
+                source="environment",
+                title="Security Header Audit Could Not Run",
+                summary=f"The security header audit was skipped because the site could not be reached: {e}",
+                detail=str(e),
+                how_it_happened="The HTTP client could not fetch the target, so response headers could not be inspected. This is a blind spot, not a pass: the site may still be missing HSTS, CSP, and other hardening headers.",
+                reproduction=f"curl -sI '{url}' | head -20",
+                fix="Confirm the site is reachable, then rerun WebDoctor. If the site blocks automated clients, allow the tester's IP or provide a staging URL.",
+            )],
             notes=f"Skipped because the site could not be reached: {e}",
         )
 
@@ -40,9 +66,24 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
                 reproduction=f"curl -sI '{resp.url}' | grep -i strict-transport-security",
                 fix="Add to your web server: `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`. Enable only after confirming all subdomains support HTTPS.",
             ))
+        else:
+            max_age = re.search(r"(?:^|;)\s*max-age\s*=\s*(\d+)", hsts, re.IGNORECASE)
+            if not max_age or int(max_age.group(1)) < 31536000:
+                issues.append(Issue(
+                    id="SEC_HSTS_WEAK",
+                    category="security",
+                    severity=Severity.WARNING,
+                    title="Weak Strict-Transport-Security (HSTS) Policy",
+                    summary="HSTS is present but max-age is missing or too short to protect users.",
+                    detail=f"Header: {hsts}",
+                    how_it_happened="A short or missing max-age tells browsers to stop enforcing HTTPS quickly, leaving a window where an SSL-strip attack can still succeed.",
+                    reproduction=f"curl -sI '{resp.url}' | grep -i strict-transport-security",
+                    fix="Use `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload` once all subdomains are HTTPS-ready.",
+                ))
 
     # 2. Content-Security-Policy
-    csp = headers.get("content-security-policy")
+    csp = headers.get("content-security-policy", "")
+    has_frame_ancestors = bool(re.search(r"\bframe-ancestors\s+", csp, re.IGNORECASE))
     if not csp:
         issues.append(Issue(
             id="SEC_CSP_MISSING",
@@ -58,7 +99,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
 
     # 3. X-Frame-Options
     xfo = headers.get("x-frame-options", "").upper()
-    if not xfo:
+    if not xfo and not has_frame_ancestors:
         issues.append(Issue(
             id="SEC_XFO_MISSING",
             category="security",
@@ -118,15 +159,24 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
 
     # 7. Cookie security flags
     cookies = resp.cookies
+    raw_cookies = [
+        v for k, v in resp.raw.headers.items() if k.lower() == "set-cookie"
+    ]
     for c in cookies:
         problems = []
+        raw = _set_cookie_for(c.name, raw_cookies)
         if is_https and not c.secure:
             problems.append("missing 'Secure' flag (can be sent over plaintext HTTP)")
-        if not c.has_nonstandard_attr("httponly") and not getattr(c, "_rest", {}).get("HttpOnly") and not getattr(c, "_rest", {}).get("httponly"):
-            # Requests cookiejar HttpOnly detection
-            raw_set_cookie = "\n".join(v for k, v in resp.raw.headers.items() if k.lower() == "set-cookie")
-            if f"{c.name}=" in raw_set_cookie and "httponly" not in raw_set_cookie.lower():
-                problems.append("missing 'HttpOnly' flag (accessible to JavaScript / XSS exfiltration)")
+        has_httponly = (
+            c.has_nonstandard_attr("httponly")
+            or bool(getattr(c, "_rest", {}).get("HttpOnly"))
+            or bool(getattr(c, "_rest", {}).get("httponly"))
+            or _has_attr(raw, r"(?:^|;)\s*httponly(?:\s*=|;|$)")
+        )
+        if raw and not has_httponly:
+            problems.append("missing 'HttpOnly' flag (accessible to JavaScript / XSS exfiltration)")
+        if raw and not _has_attr(raw, r"(?:^|;)\s*samesite\s*=\s*(?:lax|strict)(?:\s*;|$)"):
+            problems.append("missing 'SameSite=Lax/Strict' flag (CSRF exposure)")
         if problems:
             issues.append(Issue(
                 id="SEC_INSECURE_COOKIE",
@@ -135,7 +185,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
                 title=f"Insecure Cookie Flag: '{c.name}'",
                 summary=f"Cookie '{c.name}' lacks hardening flags: {', '.join(problems)}.",
                 detail=f"Cookie name={c.name}, domain={c.domain}, secure={c.secure}.",
-                how_it_happened="When session/authentication cookies lack 'Secure', they can be leaked if a user ever visits an HTTP link on the same domain. Without 'HttpOnly', any XSS vulnerability can read the cookie via document.cookie and steal the session.",
+                how_it_happened="When session/authentication cookies lack 'Secure', they can be leaked over plaintext HTTP. Without 'HttpOnly' they are readable by JavaScript after XSS; without 'SameSite' they can be sent on cross-site requests.",
                 reproduction=f"curl -sI '{resp.url}' | grep -i set-cookie",
                 fix="Set `Secure; HttpOnly; SameSite=Lax` on every authentication/session cookie in your application's session configuration.",
             ))

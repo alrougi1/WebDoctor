@@ -52,6 +52,58 @@ def generate_markdown(report: TestReport) -> str:
         lines.append(f"| {cr.name} | **{cr.status.value.upper()}** | {cr.duration_ms}ms | {len(cr.issues)} |")
     lines.append("")
 
+    runner_notes = getattr(report, "environment_issues", None) or []
+    if runner_notes:
+        lines.append("## Runner Notes (not scored)")
+        for note in runner_notes[:20]:
+            lines.append(f"- **[{note.category}] {note.title}** — {note.summary}")
+        lines.append("")
+
+    # Dedicated deterministic monkey/chaos section
+    monkey = next((cr for cr in report.check_results if cr.category == "monkey"), None)
+    if monkey is not None:
+        mm = monkey.metrics or {}
+        lines.append("## Hard Monkey Test")
+        if monkey.status == CheckStatus.SKIPPED:
+            lines.append(f"- **Status:** SKIPPED ({mm.get('skipped_reason', 'not run')})")
+            lines.append("")
+        else:
+            lines.append(
+                f"- **Seed:** `{mm.get('seed', 'n/a')}` | **Status:** {monkey.status.value.upper()} | "
+                f"**Actions:** {mm.get('actions_executed', 0)}/{mm.get('planned_actions', 0)} executed, "
+                f"{mm.get('actions_skipped', 0)} skipped"
+            )
+            lines.append(
+                f"- **Safety:** {mm.get('blocked_submit_count', 0)} form submits, "
+                f"{mm.get('blocked_mutation_count', 0)} write requests and "
+                f"{len(mm.get('off_origin_navigation_attempts') or [])} off-origin navigations blocked"
+            )
+            lines.append(
+                f"- **Findings:** {mm.get('js_error_count', 0)} JS errors, "
+                f"{mm.get('console_error_count', 0)} console errors, "
+                f"{mm.get('dialog_count', 0)} dialogs, {mm.get('page_crash_count', 0)} crashes"
+            )
+            fingerprint = mm.get("config_fingerprint")
+            if fingerprint:
+                lines.append(f"- **Run fingerprint:** `{fingerprint}` (same seed + options = same action plan)")
+            trace = (mm.get("trace") or [])[:25]
+            if trace:
+                lines.append("")
+                lines.append("| Step | Action | Target | Result | URL |")
+                lines.append("|---|---|---|---|---|")
+                for step in trace:
+                    target = (step.get("selector") or step.get("key") or
+                              (f"dy={step.get('dy')}" if step.get("dy") is not None else
+                               f"{step.get('width')}x{step.get('height')}" if step.get("width") else ""))
+                    row = [
+                        str(step.get("step", "")), str(step.get("type", "")), str(target),
+                        str(step.get("result", "")), str(step.get("url", "")),
+                    ]
+                    lines.append("| " + " | ".join(v.replace("|", "\\|")[:90] for v in row) + " |")
+                if len(mm.get("trace") or []) > 25:
+                    lines.append("| ... | ... | ... | ... | ... |")
+            lines.append("")
+
     # Issue details
     if report.issues:
         lines.append("## Issues & Root-Cause Explanations")

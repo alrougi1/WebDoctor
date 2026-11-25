@@ -7,11 +7,24 @@ import logging
 from typing import List, Dict, Optional
 
 from webdoctor.models import TestReport
-from webdoctor.config import AI_MODEL_FAST
+from webdoctor.config import (
+    API_KEY_ENV_VARS,
+    default_model_for_provider,
+    provider_credentials_available,
+)
 from webdoctor.diagnostics.rule_engine import generate_rule_summary
 from webdoctor.diagnostics.ai_adapters import call_llm
 
 log = logging.getLogger(__name__)
+
+
+def _no_key_notice(provider: str) -> str:
+    env_var = API_KEY_ENV_VARS.get((provider or "sandbox").lower(), "an API key")
+    return (
+        f"> **AI diagnosis skipped:** no credentials were found for provider `{provider}` "
+        f"(expected `{env_var}` or `--ai-key`). Using the deterministic rule-based summary "
+        "instead. Configure a key to enable AI, or pass `--no-ai` to silence this notice.\n\n"
+    )
 
 
 def build_diagnosis_prompt(report: TestReport) -> str:
@@ -35,13 +48,16 @@ def build_diagnosis_prompt(report: TestReport) -> str:
 
 def generate_ai_diagnosis(
     report: TestReport,
-    model: str = AI_MODEL_FAST,
+    model: Optional[str] = None,
     provider: str = "sandbox",
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     compare: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Generate AI diagnosis. `compare` runs multiple models and produces a consensus report."""
+    provider = (provider or "sandbox").strip().lower()
+    model = model or default_model_for_provider(provider)
+
     if not report.issues:
         return generate_rule_summary(report)
 
@@ -49,6 +65,10 @@ def generate_ai_diagnosis(
 
     if compare and len(compare) > 1:
         return _multi_model_diagnosis(prompt, compare)
+
+    if not provider_credentials_available(provider, api_key=api_key, api_base=api_base):
+        log.warning("No credentials for provider %s; using rule-based diagnosis", provider)
+        return _no_key_notice(provider) + generate_rule_summary(report)
 
     try:
         content = call_llm(prompt, provider=provider, model=model, api_key=api_key, api_base=api_base, max_tokens=2200)
@@ -65,13 +85,20 @@ def _multi_model_diagnosis(prompt: str, models: List[Dict[str, str]]) -> str:
     results: Dict[str, str] = {}
     for m in models:
         label = m.get("label") or m.get("model", "AI")
+        provider = (m.get("provider") or "sandbox").lower()
+        api_key = m.get("api_key")
+        api_base = m.get("api_base")
+        model = m.get("model") or default_model_for_provider(provider)
+        if not provider_credentials_available(provider, api_key=api_key, api_base=api_base):
+            results[label] = f"*Skipped: {_no_key_notice(provider).strip()}*"
+            continue
         try:
             results[label] = call_llm(
                 prompt,
-                provider=m.get("provider", "sandbox"),
-                model=m.get("model", AI_MODEL_FAST),
-                api_key=m.get("api_key"),
-                api_base=m.get("api_base"),
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                api_base=api_base,
                 max_tokens=2200,
             )
         except Exception as e:
