@@ -52,6 +52,13 @@ def generate_markdown(report: TestReport) -> str:
         lines.append(f"| {cr.name} | **{cr.status.value.upper()}** | {cr.duration_ms}ms | {len(cr.issues)} |")
     lines.append("")
 
+    runner_notes = getattr(report, "environment_issues", None) or []
+    if runner_notes:
+        lines.append("## Runner Notes (not scored)")
+        for note in runner_notes[:20]:
+            lines.append(f"- **[{note.category}] {note.title}** — {note.summary}")
+        lines.append("")
+
     # Dedicated deterministic monkey/chaos section
     monkey = next((cr for cr in report.check_results if cr.category == "monkey"), None)
     if monkey is not None:

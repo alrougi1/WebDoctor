@@ -1,6 +1,7 @@
 """Broken link & resource checker: crawls <a> and <img> references concurrently."""
 from __future__ import annotations
 
+import shlex
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -61,8 +62,9 @@ def _check_one(ref: Dict[str, str], verify: bool = True) -> Dict[str, Any]:
     try:
         t0 = time.perf_counter()
         r = requests.head(url, headers=headers, timeout=12, allow_redirects=True, verify=verify)
-        if r.status_code in (405, 501):
-            # Only retry when HEAD itself is unsupported; a real 404 is a broken link.
+        if r.status_code >= 400:
+            # Many servers answer HEAD with 403/404 even though GET works. Only
+            # classify the link as broken after the GET fallback also fails.
             r = requests.get(url, headers=headers, timeout=12, allow_redirects=True,
                              verify=verify, stream=True)
             r.close()
@@ -126,7 +128,7 @@ def run_links_check(url: str, html: str, verify: bool = True) -> CheckResult:
             summary=f"The link{link_text} on this page returns {f'HTTP {status}' if status else err}.",
             detail=f"Source tag: <{ref_kind}> | Link text: '{r.get('text','')}'\nTarget: {r['url']}\nResult: status={status}, error={err}",
             how_it_happened=_explain_link_failure(status, err, r["url"]),
-            reproduction=f"curl -sI -o /dev/null -w 'HTTP %{{http_code}}\\n' '{r['url']}'",
+            reproduction=f"curl -sI -o /dev/null -w 'HTTP %{{http_code}}\\n' {shlex.quote(r['url'])}",
             fix=_fix_link(status, r["url"], ref_kind),
         ))
 

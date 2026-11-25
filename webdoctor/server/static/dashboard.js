@@ -21,6 +21,7 @@ function onProvChange(){
   sel.value=DEFAULT_MODELS[p]||ids[0];
 }
 loadModels();
+clearExports();
 
 document.getElementById('f').addEventListener('submit', async e=>{
   e.preventDefault();
@@ -78,7 +79,57 @@ async function poll(id){
   document.getElementById('go').disabled=false;
 }
 
-function hideResults(){ document.getElementById('hero').style.display='none'; document.getElementById('diag').style.display='none'; document.getElementById('issuesbox').style.display='none'; }
+function hideResults(){ document.getElementById('hero').style.display='none'; document.getElementById('diag').style.display='none'; document.getElementById('issuesbox').style.display='none'; clearExports(); }
+
+function setExportMsg(text, cls){
+  const el=document.getElementById('exportmsg');
+  if(!el) return;
+  el.textContent=text;
+  el.className=cls||'modelnote';
+}
+function clearExports(){
+  document.querySelectorAll('.export-btn').forEach(btn=>{
+    btn.disabled=true; btn.onclick=null; btn.title='Run a diagnosis to enable exports.';
+  });
+  setExportMsg('Run a diagnosis to generate exportable reports.');
+}
+function setupExports(id, rep){
+  document.querySelectorAll('.export-btn').forEach(btn=>{
+    const fmt=btn.dataset.fmt;
+    btn.disabled=false;
+    btn.title='Download '+fmt.toUpperCase()+' report';
+    btn.onclick=()=>downloadReport(id, fmt, btn);
+  });
+  const pdfBtn=document.getElementById('dl_pdf');
+  if(!rep.pdf_available){
+    pdfBtn.disabled=true;
+    pdfBtn.title='PDF generation was unavailable for this run; HTML/Markdown/JSON are available.';
+    setExportMsg('PDF unavailable for this run; HTML, Markdown and JSON are ready to download.', 'errmsg');
+  }else{
+    setExportMsg('Reports are saved as files when you click a format.');
+  }
+}
+async function downloadReport(id, fmt, btn){
+  const original=btn.textContent;
+  btn.disabled=true; btn.textContent='Downloading...';
+  setExportMsg('Preparing '+fmt.toUpperCase()+' download...');
+  try{
+    const r=await fetch('/api/reports/'+id+'/'+fmt, {cache:'no-store'});
+    if(!r.ok) throw new Error('server returned HTTP '+r.status);
+    const blob=await r.blob();
+    if(!blob.size) throw new Error('report file is empty');
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download='webdoctor-'+id+'.'+fmt;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 2000);
+    setExportMsg('Saved webdoctor-'+id+'.'+fmt+' ('+Math.round(blob.size/1024)+' KB).', 'okmsg');
+  }catch(e){
+    setExportMsg('Download failed: '+e.message, 'errmsg');
+  }finally{
+    btn.textContent=original; btn.disabled=false;
+  }
+}
 
 function render(id, rep){
   document.getElementById('hero').style.display='grid';
@@ -96,17 +147,15 @@ function render(id, rep){
   document.getElementById('sjs').textContent=(rep.metrics||{}).js_error_count||0;
   document.getElementById('smonkey').textContent=ms.actions_executed||0;
   document.getElementById('sdur').textContent=((rep.duration_ms||0)/1000).toFixed(1)+'s';
-  document.getElementById('dl_html').href='/api/reports/'+id+'/html';
-  document.getElementById('dl_md').href='/api/reports/'+id+'/md';
-  document.getElementById('dl_json').href='/api/reports/'+id+'/json';
-  document.getElementById('dl_pdf').href='/api/reports/'+id+'/pdf';
-  if(!rep.pdf_available) document.getElementById('dl_pdf').style.display='none';
+  setupExports(id, rep);
 
   if(rep.ai_summary){ const d=document.getElementById('diag'); d.style.display='block';
     document.getElementById('diagbody').textContent=rep.ai_summary; }
 
   const box=document.getElementById('issuesbox'); const list=document.getElementById('issuelist'); list.innerHTML='';
-  const issues=rep.issues||[]; document.getElementById('icnt').textContent=issues.length;
+  const issues=rep.issues||[];
+  const envCount=rep.environment_issue_count||0;
+  document.getElementById('icnt').textContent=issues.length+(envCount?' +'+envCount+' runner note'+(envCount===1?'':'s')+' (not scored)':'');
   if(issues.length){ box.style.display='block'; }
   issues.forEach((it,idx)=>{
     const el=document.createElement('div');

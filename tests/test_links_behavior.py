@@ -11,7 +11,7 @@ class _Response:
         pass
 
 
-def test_head_404_is_not_retried_with_get(monkeypatch):
+def test_head_404_is_confirmed_with_get(monkeypatch):
     calls = []
 
     def _head(*_args, **_kwargs):
@@ -20,16 +20,31 @@ def test_head_404_is_not_retried_with_get(monkeypatch):
 
     def _get(*_args, **_kwargs):
         calls.append("GET")
-        raise AssertionError("GET must not be used for a genuine 404")
+        return _Response(404, "https://example.com/missing")
 
     monkeypatch.setattr(links.requests, "head", _head)
     monkeypatch.setattr(links.requests, "get", _get)
     result = links.run_links_check(
         "https://example.com", '<a href="https://example.com/missing">Missing</a>'
     )
-    assert calls == ["HEAD"]
+    assert calls == ["HEAD", "GET"]
     assert result.metrics["broken_count"] == 1
     assert result.metrics["links_checked"] == 1
+
+
+def test_head_403_get_200_is_not_broken(monkeypatch):
+    def _head(*_args, **_kwargs):
+        return _Response(403, "https://example.com/protected")
+
+    def _get(*_args, **_kwargs):
+        return _Response(200, "https://example.com/protected")
+
+    monkeypatch.setattr(links.requests, "head", _head)
+    monkeypatch.setattr(links.requests, "get", _get)
+    result = links.run_links_check(
+        "https://example.com", '<a href="https://example.com/protected">OK</a>'
+    )
+    assert result.metrics["broken_count"] == 0
 
 
 def test_head_405_retries_once_with_get(monkeypatch):

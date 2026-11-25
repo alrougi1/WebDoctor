@@ -39,7 +39,7 @@ where = ["."]
 include = ["webdoctor*"]
 
 [tool.setuptools.package-data]
-webdoctor = ["server/templates/*.html", "server/static/*.css", "server/static/*.js"]
+webdoctor = ["server/templates/*.html", "server/static/*.css", "server/static/*.js", "server/static/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -62,6 +62,30 @@ def test_report_file_rejects_invalid_job_id(client):
     assert response.status_code == 400
 
 
+def test_export_buttons_use_native_blob_downloads(client):
+    html = client.get("/").text
+    js = client.get("/static/dashboard.js").text
+    assert 'class="sec export-btn" data-fmt="html"' in html
+    for fmt in ("html", "md", "json", "pdf"):
+        assert f'data-fmt="{fmt}"' in html
+    assert 'target="_blank"' not in html
+    assert "URL.createObjectURL" in js
+    assert "a.download='webdoctor-'+id+'.'+fmt" in js
+    assert "downloadReport(id, fmt, btn)" in js
+
+
+def test_report_file_serves_as_attachment(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(server_app, "REPORT_DIR", str(tmp_path))
+    job_dir = tmp_path / "abc123def456"
+    job_dir.mkdir()
+    (job_dir / "report.html").write_text("<h1>report</h1>", encoding="utf-8")
+    response = client.get("/api/reports/abc123def456/html")
+    assert response.status_code == 200
+    disposition = response.headers["content-disposition"].lower()
+    assert "attachment" in disposition
+    assert "webdoctor-abc123def456.html" in disposition
+
+
 def test_job_pruning_and_capacity(monkeypatch):
     monkeypatch.setattr(server_app, "jobs", {})
     monkeypatch.setattr(server_app, "MAX_JOBS", 2)

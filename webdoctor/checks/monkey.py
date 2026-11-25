@@ -344,6 +344,7 @@ def _monkey_issue(
     fix: str,
     severity: Severity = Severity.ERROR,
     category: str = "monkey",
+    source: str = "rule",
 ) -> Issue:
     return Issue(
         id=issue_id,
@@ -355,6 +356,7 @@ def _monkey_issue(
         how_it_happened=how,
         reproduction=reproduction,
         fix=fix,
+        source=source,
     )
 
 
@@ -367,6 +369,7 @@ def _failed_result(name: str, message: str, issue_id: str, how: str, fix: str) -
             issue_id, "Monkey Test Could Not Run", message, message, how,
             "Re-run with the same seed after fixing the browser/environment problem.", fix,
             Severity.CRITICAL,
+            source="environment",
         )],
     )
 
@@ -644,6 +647,7 @@ def run_monkey_check(
             "Re-run `playwright install chromium`, then retry with the same seed.",
             "Reinstall browser binaries and check available memory/disk space.",
             Severity.CRITICAL,
+            source="environment",
         ))
 
     # Suppress faults the ordinary browser suite already reported, then group

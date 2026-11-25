@@ -5,8 +5,11 @@
 <link rel="stylesheet" href="/static/dashboard.css"></head><body>
 <div class="wrap">
 <header>
-<div><div class="logo"><span>WebDoctor</span></div><div class="sub">Automated website testing + root-cause diagnostics with multiple AI providers</div></div>
-<div class="sub">v{{ tool_version }}</div>
+<div class="brand-center">
+<div class="logo"><img class="brand-mark" src="/static/webdoctor-emblem.svg" alt="WebDoctor emblem"><span>WebDoctor</span></div>
+<div class="sub">Automated website testing + root-cause diagnostics with multiple AI providers</div>
+</div>
+<div class="sub version">v{{ tool_version }}</div>
 </header>
 
 <div class="box">
@@ -95,12 +98,13 @@
 <div class="stat"><div class="n" id="smonkey">0</div><div class="l">Monkey Actions</div></div>
 <div class="stat"><div class="n" id="sdur">0s</div><div class="l">Duration</div></div>
 </div>
-<div class="toolbar">
-<a class="btn" id="dl_html" href="#" target="_blank"><button class="sec">Open HTML report</button></a>
-<a class="btn" id="dl_md" href="#" target="_blank"><button class="sec">Markdown</button></a>
-<a class="btn" id="dl_json" href="#" target="_blank"><button class="sec">JSON</button></a>
-<a class="btn" id="dl_pdf" href="#" target="_blank"><button class="sec">PDF</button></a>
+<div class="toolbar" id="exportbar">
+<button type="button" class="sec export-btn" data-fmt="html" id="dl_html">Download HTML</button>
+<button type="button" class="sec export-btn" data-fmt="md" id="dl_md">Download Markdown</button>
+<button type="button" class="sec export-btn" data-fmt="json" id="dl_json">Download JSON</button>
+<button type="button" class="sec export-btn" data-fmt="pdf" id="dl_pdf">Download PDF</button>
 </div>
+<div class="modelnote" id="exportmsg">Reports are saved as files when you click a format.</div>
 </div>
 </div>
 

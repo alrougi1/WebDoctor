@@ -6,21 +6,22 @@ import html as html_escape
 import json
 import os
 import re
+from pathlib import Path
 from typing import Optional
 from webdoctor.models import TestReport, Severity, CheckStatus
 
 
 GRADE_COLORS = {
-    "A": ("#10b981", "#059669"),
-    "B": ("#3b82f6", "#2563eb"),
-    "C": ("#f59e0b", "#d97706"),
-    "D": ("#f97316", "#ea580c"),
-    "F": ("#ef4444", "#dc2626"),
+    "A": ("#22c55e", "#0f7a3d"),
+    "B": ("#38bdf8", "#0369a1"),
+    "C": ("#f59e0b", "#b45309"),
+    "D": ("#fb923c", "#c2410c"),
+    "F": ("#ff2d55", "#8b0018"),
 }
 
 SEV_COLORS = {
-    Severity.CRITICAL: ("#ef4444", "#fee2e2"),
-    Severity.ERROR:    ("#f97316", "#ffedd5"),
+    Severity.CRITICAL: ("#ff2d55", "#3b0a14"),
+    Severity.ERROR:    ("#fb923c", "#431507"),
     Severity.WARNING:  ("#f59e0b", "#fef3c7"),
     Severity.INFO:     ("#64748b", "#f1f5f9"),
 }
@@ -42,6 +43,15 @@ ALLOWED_HTML_ATTRS = {
 
 def _esc(s: Optional[str]) -> str:
     return html_escape.escape(str(s or ""), quote=True)
+
+
+def _emblem_svg() -> str:
+    """Inline the original crimson WebDoctor emblem so reports stay standalone."""
+    path = Path(__file__).resolve().parents[1] / "server" / "static" / "webdoctor-emblem.svg"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def _md_to_html(md: str) -> str:
@@ -145,6 +155,30 @@ def _monkey_section(report: TestReport) -> str:
 </section>"""
 
 
+def _environment_section(report: TestReport) -> str:
+    """Show runner/environment notes without mixing them into scored findings."""
+    notes = getattr(report, "environment_issues", None) or []
+    if not notes:
+        return ""
+    rows = "".join(
+        "<tr><td>" + _esc(n.category) + "</td><td>" + _esc(n.title) + "</td><td>"
+        + _esc(n.summary) + "</td></tr>"
+        for n in notes[:20]
+    )
+    return f"""
+<section class="sec">
+  <h2>Runner Notes (not scored)</h2>
+  <div class="diag-box">
+    <p>These entries describe tester/environment failures. They are shown for
+    transparency but do not lower the site grade.</p>
+    <table style="margin-top:10px">
+      <thead><tr><th>Category</th><th>Note</th><th>Detail</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</section>"""
+
+
 def generate_html(report: TestReport) -> str:
     counts = report.issue_counts()
     grade = report.overall_grade
@@ -216,11 +250,14 @@ def generate_html(report: TestReport) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WebDoctor Report — {_esc(report.url)}</title>
 <style>
-:root{{--bg:#0b0f19;--card:#121a2b;--card2:#172238;--txt:#e2e8f0;--mut:#94a3b8;--border:#1f2f4f;--accent:#6366f1;--grad1:{c1};--grad2:{c2}}}
-*{{box-sizing:border-box}} body{{margin:0;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}}
-a{{color:#a5b4fc}} .wrap{{max-width:1160px;margin:0 auto;padding:28px 18px 80px}}
-header{{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;border-bottom:1px solid var(--border);padding-bottom:18px}}
-.logo{{font-size:24px;font-weight:800;letter-spacing:-.5px}} .logo span{{color:var(--grad1)}}
+:root{{--bg:#040407;--card:#090b12;--card2:#11131c;--txt:#f5f6fa;--mut:#9aa3b6;--border:#2a111a;--accent:#ff2d55;--grad1:{c1};--grad2:{c2}}}
+*{{box-sizing:border-box}} body{{margin:0;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--txt);
+  background:radial-gradient(900px 520px at 10% -10%,rgba(255,45,85,.10),transparent 60%),radial-gradient(760px 460px at 100% 0%,rgba(139,0,24,.10),transparent 55%),var(--bg)}}
+a{{color:#ff8098}} .wrap{{max-width:1160px;margin:0 auto;padding:28px 18px 80px}}
+header{{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;border-bottom:1px solid var(--border);padding-bottom:18px;position:relative}}
+header:after{{content:"";position:absolute;left:0;bottom:-1px;width:120px;height:2px;background:linear-gradient(90deg,var(--accent),transparent)}}
+.logo{{display:flex;align-items:center;gap:10px;font-size:24px;font-weight:800;letter-spacing:-.5px}} .logo span{{color:var(--grad1)}}
+.brand-mark svg{{width:36px;height:36px;display:block;filter:drop-shadow(0 0 10px rgba(255,45,85,.35))}}
 .meta{{color:var(--mut);font-size:13px}}
 .hero{{display:grid;grid-template-columns:220px 1fr;gap:20px;margin-top:24px;background:linear-gradient(135deg,rgba(99,102,241,.12),transparent 70%);border:1px solid var(--border);border-radius:18px;padding:22px}}
 .grade-card{{display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--grad1),var(--grad2));border-radius:14px;color:#fff;padding:22px;text-align:center;box-shadow:0 12px 30px rgba(0,0,0,.35)}}
@@ -274,7 +311,7 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
 <div class="wrap">
 <header>
   <div>
-    <div class="logo"><span>&#9670;</span> WebDoctor</div>
+    <div class="logo"><span class="brand-mark">{_emblem_svg()}</span><span>WebDoctor</span></div>
     <div class="meta">Automated website testing &amp; root-cause diagnostics</div>
   </div>
   <div class="meta" style="text-align:right">
@@ -315,6 +352,8 @@ footer{{margin-top:60px;text-align:center;color:var(--mut);font-size:13px;border
   </div>
   <div id="issues">{issues_html}</div>
 </section>
+
+{_environment_section(report)}
 
 <section class="sec">
   <h2>Check Suites</h2>

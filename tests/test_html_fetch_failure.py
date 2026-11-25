@@ -23,7 +23,10 @@ def test_html_fetch_failure_skips_html_based_suites(monkeypatch):
         "https://example.com", browser_mode=False, check_links=True, ai=False
     )
     ids = {i.id for i in report.issues}
-    assert "HTML_FETCH_FAILED" in ids
+    env_ids = {i.id for i in report.environment_issues}
+    assert "HTML_FETCH_FAILED" in env_ids
+    assert "HTML_FETCH_FAILED" not in ids
+    assert report.score == 100
     assert not any(i.id.startswith(("SEO_", "A11Y_", "LINK_BROKEN")) for i in report.issues)
 
     statuses = {cr.category: cr.status for cr in report.check_results}

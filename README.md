@@ -184,7 +184,7 @@ Every run can emit four reports (saved to `--report-dir`, default `./reports`):
 | `report.html` | Self-contained interactive report with embedded screenshots |
 | `report.md` | One-page markdown — PR comments, CI summaries, Slack bots |
 | `report.json` | Machine-readable results for dashboards and Datadog |
-| `report.pdf` | Clean shareable PDF for stakeholders (WeasyPrint; skipped with a warning if its system libraries are unavailable) |
+| `report.pdf` | Clean shareable PDF for stakeholders (WeasyPrint first, headless Chromium fallback; skipped with a warning only if neither renderer can produce a file) |
 | `storage_state.json` | Saved login session for authenticated runs (reusable; keep private) |
 
 **Important:** Reports and session files can contain private URLs, screenshots, and reusable authentication cookies. Never publish or share them. The repository ignores generated `reports/` by default; use a test account and protect session files like passwords.
@@ -265,7 +265,7 @@ pytest -q                    # all suites (legacy + focused regression tests)
 python tests/test_all.py     # legacy suite only
 ```
 
-The current full suite is 65 tests (22 legacy + 43 focused regression tests, including 12 monkey-suite tests).
+The current full suite is 82 tests (22 legacy + 60 focused regression tests, including 12 monkey-suite tests).
 
 ---
 

@@ -124,10 +124,20 @@ class TestReport:
     ai_summary: Optional[str] = None
     tool_version: str = "1.0.0"
     score_breakdown: Dict[str, Any] = field(default_factory=dict)
+    # Runner/environment failures (browser crash, HTML fetch failure, unreachable
+    # security probe) are kept for visibility but never penalize the target site.
+    environment_issues: List[Issue] = field(default_factory=list)
 
     def compute_summary(self) -> "TestReport":
         """De-duplicate root causes, then compute score, grade, and status."""
-        raw_issues = [i for cr in self.check_results for i in cr.issues]
+        all_issues = [i for cr in self.check_results for i in cr.issues]
+        environment_issues = [
+            i for i in all_issues if i.source == "environment"
+        ]
+        raw_issues = [
+            i for i in all_issues if i.source != "environment"
+        ]
+        self.environment_issues = environment_issues
         raw_counts = {
             sev.value: sum(1 for i in raw_issues if i.severity == sev)
             for sev in Severity
@@ -209,6 +219,7 @@ class TestReport:
             "raw_counts": raw_counts,
             "deduplicated_counts": self.issue_counts(),
             "duplicates_collapsed": len(raw_issues) - len(self.issues),
+            "environment_issue_count": len(environment_issues),
             "penalties": penalties,
             "capped_errors_by_category": capped_errors,
             "capped_warnings_by_category": capped_warnings,
@@ -227,6 +238,9 @@ class TestReport:
         d["overall_status"] = self.overall_status.value if hasattr(self.overall_status, "value") else str(self.overall_status)
         d["check_results"] = [cr.to_dict() if isinstance(cr, CheckResult) else cr for cr in self.check_results]
         d["issues"] = [i.to_dict() if isinstance(i, Issue) else i for i in self.issues]
+        d["environment_issues"] = [
+            i.to_dict() if isinstance(i, Issue) else i for i in self.environment_issues
+        ]
         d["issue_counts"] = self.issue_counts()
         return d
 

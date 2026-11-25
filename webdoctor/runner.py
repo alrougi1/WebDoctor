@@ -212,6 +212,7 @@ def run_diagnostics(
                     id="AUTH_LOGIN_FAILED",
                     category="auth",
                     severity=Severity.CRITICAL,
+                    source="environment",
                     title="Automated Login Failed",
                     summary=res.get("error", "Unknown login failure"),
                     detail=f"Login URL: {login_url}\nResult: {res}",
@@ -245,6 +246,7 @@ def run_diagnostics(
             name="Page HTML Retrieval", category="http", status=CheckStatus.FAILED,
             issues=[Issue(
                 id="HTML_FETCH_FAILED", category="http", severity=Severity.ERROR,
+                source="environment",
                 title="Could Not Retrieve Page HTML",
                 summary=f"The HTML document could not be fetched: {e}",
                 detail=str(e),

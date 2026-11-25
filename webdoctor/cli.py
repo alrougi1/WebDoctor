@@ -248,7 +248,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                 written.append(("PDF", candidate))
             else:
                 print(f"[warning] PDF generation skipped for {candidate} "
-                      "(WeasyPrint unavailable or rendering failed); HTML/MD/JSON are still available.",
+                      "(no renderer produced a file); HTML/MD/JSON are still available.",
                       file=sys.stderr)
         except Exception as e:
             print(f"[error] failed to write PDF report to {candidate}: {e}", file=sys.stderr)

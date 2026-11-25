@@ -297,6 +297,7 @@ def _background_run(job_id: str, req: DiagnoseRequest):
                 "url": report.final_url or report.url,
                 "target_title": report.target_title,
                 "issue_counts": report.issue_counts(),
+                "environment_issue_count": len(getattr(report, "environment_issues", None) or []),
                 "duration_ms": report.duration_ms,
                 "issues": [i.to_dict() for i in report.issues],
                 "ai_summary": report.ai_summary,
