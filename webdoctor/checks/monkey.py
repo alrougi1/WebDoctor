@@ -175,7 +175,9 @@ _HEALTH_SCRIPT = r"""() => ({
 
 # A monkey must not mutate user data. Block every form submission even if a
 # scripted event handler tries to submit a form as a side effect of a click.
-_SUBMIT_GUARD_SCRIPT = r"""() => {
+_SUBMIT_GUARD_SCRIPT = r"""(() => {
+  if (window.__webdoctorMonkeyGuardInstalled) return;
+  window.__webdoctorMonkeyGuardInstalled = true;
   window.__webdoctorMonkeyBlockedSubmits = 0;
   document.addEventListener('submit', (event) => {
     window.__webdoctorMonkeyBlockedSubmits++;
@@ -187,7 +189,7 @@ _SUBMIT_GUARD_SCRIPT = r"""() => {
     if (HTMLFormElement.prototype.requestSubmit) HTMLFormElement.prototype.requestSubmit = blocked;
     HTMLFormElement.prototype.submit = blocked;
   }
-}"""
+})()"""
 
 
 def _origin(url: str) -> str:
@@ -474,6 +476,9 @@ def run_monkey_check(
 
             context.route("**/*", _guard_route)
             page = context.new_page()
+            # Register before navigation so scripts running during the initial
+            # page load cannot submit a form before the guard exists.
+            page.add_init_script(_SUBMIT_GUARD_SCRIPT)
 
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -488,7 +493,8 @@ def run_monkey_check(
                 )
 
             final_url = page.url
-            page.add_init_script(_SUBMIT_GUARD_SCRIPT)
+            # Idempotent re-injection for the current document; the init script
+            # above already covers the initial load and every later navigation.
             try:
                 page.evaluate(_SUBMIT_GUARD_SCRIPT)
             except Exception:

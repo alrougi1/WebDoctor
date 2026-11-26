@@ -5,6 +5,7 @@ import re
 from bs4 import BeautifulSoup
 from typing import List
 from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
+from webdoctor.shell import quote
 
 
 def run_seo_a11y_check(url: str, html: str) -> CheckResult:
@@ -23,7 +24,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="The page has no <title> element in the HTML head.",
             detail="<title> is absent or contains only whitespace.",
             how_it_happened="Search engines use the title tag as the primary headline in search result snippets, and browsers display it in tabs. Without it, search engines may pick a suboptimal headline and click-through rates will drop.",
-            reproduction=f"curl -s '{url}' | grep -o '<title>[^<]*</title>'",
+            reproduction=f"curl -s {quote(url)} | grep -o '<title>[^<]*</title>'",
             fix="Add a unique, descriptive `<title>` tag (50–60 characters) inside the `<head>` of this page.",
         ))
     elif len(title_text) < 10:
@@ -35,7 +36,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary=f"Title is '{title_text[:60]}', which is unusually short.",
             detail=f"Length: {len(title_text)} characters (recommended: 50–60).",
             how_it_happened="Short titles waste valuable keyword real-estate in search results and may not adequately identify the page.",
-            reproduction=f"curl -s '{url}' | grep -o '<title>[^<]*</title>'",
+            reproduction=f"curl -s {quote(url)} | grep -o '<title>[^<]*</title>'",
             fix="Expand the title to clearly name the page topic plus the brand name, around 50–60 characters.",
         ))
     elif len(title_text) > 70:
@@ -47,7 +48,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary=f"Title exceeds 70 characters and will likely be cut off by search engines.",
             detail=f"Length: {len(title_text)} chars: '{title_text[:80]}...'",
             how_it_happened="Google truncates titles around 600 px (roughly 50–60 characters), so the end of your title may not appear in search results.",
-            reproduction=f"curl -s '{url}' | grep -o '<title>[^<]*</title>'",
+            reproduction=f"curl -s {quote(url)} | grep -o '<title>[^<]*</title>'",
             fix="Shorten the title to 50–60 characters, keeping the most important keywords near the beginning.",
         ))
 
@@ -63,7 +64,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="There is no <meta name='description'> tag for search snippets.",
             detail="Search engines will auto-generate snippets from body text, which is often less relevant.",
             how_it_happened="Without a crafted meta description, the snippet under your title in search results is chosen automatically, usually reducing click-through rates.",
-            reproduction=f"curl -s '{url}' | grep -iE 'meta[^>]*description'",
+            reproduction=f"curl -s {quote(url)} | grep -iE 'meta[^>]*description'",
             fix="Add `<meta name='description' content='...'>` (120–160 characters) summarizing what a visitor gets from this page.",
         ))
     elif len(desc_text) < 50 or len(desc_text) > 165:
@@ -75,7 +76,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="Meta descriptions perform best between 120 and 160 characters.",
             detail=f"Current length: {len(desc_text)} chars.",
             how_it_happened="Too-short descriptions miss the chance to persuade searchers; overly long descriptions get truncated with an ellipsis in SERPs.",
-            reproduction=f"curl -s '{url}' | grep -iE 'meta[^>]*description'",
+            reproduction=f"curl -s {quote(url)} | grep -iE 'meta[^>]*description'",
             fix="Adjust the meta description length to 120–160 characters including a call to action.",
         ))
 
@@ -90,7 +91,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="Mobile browsers will render the page at desktop width and zoom out.",
             detail="`<meta name='viewport' content='width=device-width, initial-scale=1'>` is missing.",
             how_it_happened="Without the viewport tag, mobile devices emulate a ~980px desktop viewport, causing tiny text and horizontal scrolling. This also fails Google's mobile-friendly test, which directly hurts search ranking.",
-            reproduction=f"curl -s '{url}' | grep -i 'name=.viewport'",
+            reproduction=f"curl -s {quote(url)} | grep -i 'name=.viewport'",
             fix="Add `<meta name='viewport' content='width=device-width, initial-scale=1'>` inside `<head>`.",
         ))
 
@@ -106,7 +107,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="Screen readers cannot determine which language voice to use.",
             detail="The <html> element has no `lang` attribute.",
             how_it_happened="Assistive technology relies on the lang attribute to pick the correct pronunciation rules. Without it, accented text, date formats, and words in other languages are mispronounced or skipped entirely.",
-            reproduction=f"curl -s '{url}' | grep -oE '<html[^>]*>'",
+            reproduction=f"curl -s {quote(url)} | grep -oE '<html[^>]*>'",
             fix="Add the primary language to the `<html>` tag, e.g. `<html lang='en'>`.",
         ))
 
@@ -139,7 +140,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="The page is missing a primary <h1> heading for the main topic.",
             detail="No <h1> element exists in the HTML body.",
             how_it_happened="Headings create the document outline that both users and crawlers use to grasp page structure. Missing an <h1> confuses screen-reader navigation and weakens topical SEO signals.",
-            reproduction=f"curl -s '{url}' | grep -oE '<h1[^>]*>'",
+            reproduction=f"curl -s {quote(url)} | grep -oE '<h1[^>]*>'",
             fix="Add a single <h1> heading that describes the primary topic of this page.",
         ))
     elif len(h1s) > 1:
@@ -166,7 +167,7 @@ def run_seo_a11y_check(url: str, html: str) -> CheckResult:
             summary="Browser tabs and bookmarks will not show a brand icon for this site.",
             detail="No <link rel='icon'> found (a default /favicon.ico may still be served).",
             how_it_happened="Without an explicit favicon link, browsers either make an extra guessing request to `/favicon.ico` or show a generic placeholder, hurting perceived professionalism.",
-            reproduction=f"curl -s '{url}' | grep -iE 'rel=.icon'",
+            reproduction=f"curl -s {quote(url)} | grep -iE 'rel=.icon'",
             fix="Add `<link rel='icon' type='image/x-icon' href='/favicon.ico'>` inside `<head>`.",
         ))
 

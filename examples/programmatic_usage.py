@@ -5,7 +5,7 @@ report = run_diagnostics(
     "https://example.com",
     browser_mode=True,
     check_links=True,
-    ai=True,              # uses the economical gpt-6-luna model
+    ai=True,              # provider default (sandbox: gpt-6-luna); rule-based fallback without credentials
     ai_model="gpt-6-luna",
 )
 

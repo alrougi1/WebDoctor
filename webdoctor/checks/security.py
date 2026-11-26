@@ -6,6 +6,7 @@ import requests
 from typing import List
 from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT
+from webdoctor.shell import quote
 
 
 def _set_cookie_for(name: str, raw_cookies: List[str]) -> str:
@@ -42,7 +43,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
                 summary=f"The security header audit was skipped because the site could not be reached: {e}",
                 detail=str(e),
                 how_it_happened="The HTTP client could not fetch the target, so response headers could not be inspected. This is a blind spot, not a pass: the site may still be missing HSTS, CSP, and other hardening headers.",
-                reproduction=f"curl -sI '{url}' | head -20",
+                reproduction=f"curl -sI {quote(url)} | head -20",
                 fix="Confirm the site is reachable, then rerun WebDoctor. If the site blocks automated clients, allow the tester's IP or provide a staging URL.",
             )],
             notes=f"Skipped because the site could not be reached: {e}",
@@ -63,7 +64,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
                 summary="The browser cannot enforce HTTPS for future visits to this origin.",
                 detail="Header: Strict-Transport-Security not present.",
                 how_it_happened="Without HSTS, a user who types the HTTP URL first can be intercepted by an attacker performing a SSL-strip/man-in-the-middle attack before the HTTPS redirect happens.",
-                reproduction=f"curl -sI '{resp.url}' | grep -i strict-transport-security",
+                reproduction=f"curl -sI {quote(resp.url)} | grep -i strict-transport-security",
                 fix="Add to your web server: `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`. Enable only after confirming all subdomains support HTTPS.",
             ))
         else:
@@ -77,7 +78,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
                     summary="HSTS is present but max-age is missing or too short to protect users.",
                     detail=f"Header: {hsts}",
                     how_it_happened="A short or missing max-age tells browsers to stop enforcing HTTPS quickly, leaving a window where an SSL-strip attack can still succeed.",
-                    reproduction=f"curl -sI '{resp.url}' | grep -i strict-transport-security",
+                    reproduction=f"curl -sI {quote(resp.url)} | grep -i strict-transport-security",
                     fix="Use `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload` once all subdomains are HTTPS-ready.",
                 ))
 
@@ -93,7 +94,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
             summary="No CSP is defined to restrict where scripts, styles, and data can be loaded from.",
             detail="Header: Content-Security-Policy not present.",
             how_it_happened="CSP is the primary defense-in-depth against Cross-Site Scripting (XSS). Without it, an attacker who injects JavaScript can freely exfiltrate session data and user input to attacker-controlled origins.",
-            reproduction=f"curl -sI '{resp.url}' | grep -i content-security-policy",
+            reproduction=f"curl -sI {quote(resp.url)} | grep -i content-security-policy",
             fix="Deploy a CSP such as `default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self';`. Start with `Content-Security-Policy-Report-Only` to catch breaks before enforcing.",
         ))
 
@@ -108,7 +109,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
             summary="This page can be embedded in an <iframe> on external sites.",
             detail="Header: X-Frame-Options not present.",
             how_it_happened="An attacker can embed your page inside a transparent iframe overlay on a malicious site, tricking authenticated users into clicking buttons or submitting forms without realizing it.",
-            reproduction=f"curl -sI '{resp.url}' | grep -i x-frame-options",
+            reproduction=f"curl -sI {quote(resp.url)} | grep -i x-frame-options",
             fix="Set `X-Frame-Options: DENY` (or `SAMEORIGIN`), or specify `frame-ancestors 'self'` inside your Content-Security-Policy.",
         ))
 
@@ -123,7 +124,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
             summary="Browsers may MIME-sniff response bodies and execute them as scripts.",
             detail=f"Header: X-Content-Type-Options = '{headers.get('x-content-type-options', 'missing')}'.",
             how_it_happened="When MIME sniffing is not disabled, browsers can re-interpret a non-executable file (like a user-uploaded image) as JavaScript if its content looks like script, creating an XSS vector.",
-            reproduction=f"curl -sI '{resp.url}' | grep -i x-content-type-options",
+            reproduction=f"curl -sI {quote(resp.url)} | grep -i x-content-type-options",
             fix="Add the header `X-Content-Type-Options: nosniff` to all responses in your server or framework middleware.",
         ))
 
@@ -138,7 +139,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
             summary="Full URLs (including query parameters) may leak in the Referer header to external origins.",
             detail="Header: Referrer-Policy not present.",
             how_it_happened="Without an explicit policy, browsers fall back to default behavior and may send full page URLs containing tokens, email addresses, or internal IDs to third-party domains linked from the page.",
-            reproduction=f"curl -sI '{resp.url}' | grep -i referrer-policy",
+            reproduction=f"curl -sI {quote(resp.url)} | grep -i referrer-policy",
             fix="Set `Referrer-Policy: strict-origin-when-cross-origin` (or `no-referrer`) in server response headers.",
         ))
 
@@ -153,7 +154,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
             summary="Browser features (camera, microphone, geolocation) are not explicitly restricted.",
             detail="Header: Permissions-Policy not present.",
             how_it_happened="Permissions-Policy restricts which powerful web APIs embedded frames and third-party scripts may access, reducing the blast radius of compromised dependencies.",
-            reproduction=f"curl -sI '{resp.url}' | grep -i permissions-policy",
+            reproduction=f"curl -sI {quote(resp.url)} | grep -i permissions-policy",
             fix="Add `Permissions-Policy: camera=(), microphone=(), geolocation=()` to restrict unneeded browser capabilities.",
         ))
 
@@ -186,7 +187,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
                 summary=f"Cookie '{c.name}' lacks hardening flags: {', '.join(problems)}.",
                 detail=f"Cookie name={c.name}, domain={c.domain}, secure={c.secure}.",
                 how_it_happened="When session/authentication cookies lack 'Secure', they can be leaked over plaintext HTTP. Without 'HttpOnly' they are readable by JavaScript after XSS; without 'SameSite' they can be sent on cross-site requests.",
-                reproduction=f"curl -sI '{resp.url}' | grep -i set-cookie",
+                reproduction=f"curl -sI {quote(resp.url)} | grep -i set-cookie",
                 fix="Set `Secure; HttpOnly; SameSite=Lax` on every authentication/session cookie in your application's session configuration.",
             ))
 
@@ -202,7 +203,7 @@ def run_security_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = 
             summary="HTTP response headers reveal specific server technology and version numbers.",
             detail=f"Server: {server or 'n/a'} | X-Powered-By: {xpow or 'n/a'}",
             how_it_happened="Detailed version banners make it trivial for attackers to look up known CVEs for that exact software release and automate targeted exploits.",
-            reproduction=f"curl -sI '{resp.url}' | grep -iE 'server:|x-powered-by:'",
+            reproduction=f"curl -sI {quote(resp.url)} | grep -iE 'server:|x-powered-by:'",
             fix="Disable banners: in nginx add `server_tokens off;`, in Apache `ServerTokens Prod`, in Express remove `app.disable('x-powered-by')`, in PHP set `expose_php = Off`.",
         ))
 

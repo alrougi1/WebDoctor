@@ -26,8 +26,8 @@ jobs:
 
       - name: Install WebDoctor
         run: |
-          pip install webdoctor
-          playwright install chromium
+          pip install -e .
+          playwright install --with-deps chromium
 
       - name: Run diagnostics
         run: |

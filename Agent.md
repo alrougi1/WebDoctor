@@ -24,7 +24,7 @@ _Living document. Update it whenever project behavior, verification gates, or pl
 | Current branch | `improvement/accuracy-pass` at `cefd0ae` |
 | Origin main | `08505b5` — PR #1 merge; current branch content equals `origin/main` |
 | Local `main` | `6c98700` — stale; branch new work from `origin/main`, not local `main` |
-| Tests | **92 collected**: 22 legacy + 70 focused, including 12 monkey tests |
+| Tests | **100 collected**: 22 legacy + 78 focused, including 15 monkey tests |
 | Version | `1.0.0` from `webdoctor/version.py` |
 | Python support | `>=3.9`; CI uses 3.11; local runs often use 3.13 |
 | Dashboard | FastAPI + Jinja2 + static CSS/JS/SVG |
@@ -247,6 +247,16 @@ Finish with `git status --short` and a full-tree secret scan (`storage_state.jso
 - [x] Verified SDK `run_diagnostics`, all four report formats, monkey suite, PDF fallback, and the dashboard live/browser smokes.
 - [x] Reconciled the sandbox model catalog with README (`gpt-6-sol` was missing). Test count is now 92 after the demo-port regression test.
 
+### 2026-11-26 — Docs consistency and P2 robustness `[x]`
+
+- [x] Fixed every stale doc in section 10 and marked the entries complete.
+- [x] Centralized reproduction-command shell quoting in `webdoctor/shell.py` and applied it across all checks and the runner.
+- [x] Renamed “consensus” to “side-by-side” in `ai_engine.py` and its tests.
+- [x] Fixed a real safety bug: the monkey submit guard was registered after navigation, and a bare arrow-function string was never invoked by Playwright. It is now an idempotent init script installed before `goto`, with a load-time submit regression test.
+- [x] Added authenticated monkey, pasted-session reuse, CLI dispatch/version, shell-quoting, and dashboard export error-path tests; full suite now 100 passed.
+- [x] Regenerated `webapp_static/pipeline.png` from the corrected `.mmd` with Mermaid CLI.
+- [x] Replaced the hardcoded dashboard version with `TOOL_VERSION`.
+
 ## 9. Decision log / plan changes
 
 ```text
@@ -262,20 +272,22 @@ Finish with `git status --short` and a full-tree secret scan (`storage_state.jso
 2026-11-26  Chose per-process token + loopback Host validation over documenting the dashboard risk; no CORS grants and no inline handlers.
 2026-11-26  Added best-effort DNS resolution to target validation; loopback hostnames stay allowed for the built-in demo and local tests.
 2026-11-26  Changed `webdoctor demo` to an OS-assigned loopback port after the fixed 8765 default hit Windows port permissions.
+2026-11-26  Installed the monkey submit guard before initial navigation as an idempotent init script after finding Playwright never invoked the bare arrow-function source.
+2026-11-26  Renamed multi-model “consensus” output to “side-by-side” to match user-facing docs.
 ```
 
 ## 10. Known inconsistencies to fix
 
-- [ ] `README.md`: “four reports” but table has five rows; `storage_state.json` is a session artifact, not a report.
-- [ ] `README.md`: HTTP suite row still says TTFB; HTTP check now labels total response time and browser reports TTFB separately.
-- [ ] `README.md` vs `ai_engine.py`: README says models are shown separately for user reconciliation; code/tests still say “consensus”.
-- [ ] `VSCODE_SETUP.md`: says “Manus built-in AI provider”; current term is “Sandbox (OpenAI-compatible proxy)”.
-- [ ] `webapp_static/pipeline.mmd` and PNG: omit auth, monkey, environment issues, compare mode; still say HTTP TTFB.
-- [ ] `last changes` line ~129: stray `.")` at end of paragraph.
-- [ ] `last changes` Phase 4 says PDF uses only WeasyPrint; later Chromium fallback supersedes it.
-- [ ] `examples/programmatic_usage.py`: comment says `ai=True` uses gpt-6-luna; without credentials it uses rule-based fallback.
-- [ ] `examples/github_action.yml`: uses `pip install webdoctor` and `playwright install chromium` without `--with-deps`; verify publication or switch to `pip install -e .`.
-- [ ] `webdoctor.egg-info/SOURCES.txt` is stale/generated; never use it as module inventory.
+- [x] `README.md`: clarified that four formats are reports and `storage_state.json` is a session artifact written only for authenticated runs.
+- [x] `README.md`: HTTP suite row now says total response time; browser suite reports TTFB separately.
+- [x] `README.md` vs `ai_engine.py`: “consensus” renamed to “side-by-side” in code/tests to match the docs.
+- [x] `VSCODE_SETUP.md`: “Manus built-in AI provider” replaced with “Sandbox (OpenAI-compatible proxy)”.
+- [x] `webapp_static/pipeline.mmd` and PNG: regenerated with auth, monkey, environment issues, compare mode and total response time.
+- [x] `last changes` stray `.")` at the end of a paragraph removed.
+- [x] `last changes` Phase 4 PDF note now points at the later Chromium fallback entry.
+- [x] `examples/programmatic_usage.py`: comment now states the provider default and rule-based fallback without credentials.
+- [x] `examples/github_action.yml`: switched to `pip install -e .` and `playwright install --with-deps chromium`.
+- [x] `webdoctor.egg-info/SOURCES.txt` marked as generated/stale; never used as a module inventory.
 - [x] `webdoctor models` listed `sandbox:gpt-6-sol`; README's sandbox table now includes it.
 
 ## 11. Future plan — prioritized backlog
@@ -289,20 +301,20 @@ Finish with `git status --short` and a full-tree secret scan (`storage_state.jso
 
 ### P1 — accuracy and consistency
 
-- [ ] Shell-quote every reproduction command, not just HTTP/link paths.
-- [ ] Rename “consensus” language in code/tests to “side-by-side comparison” or clarify semantics.
-- [ ] Fix all stale docs listed in section 10.
-- [ ] Regenerate `pipeline.png` after fixing `pipeline.mmd`.
-- [ ] Re-verify model catalog against provider docs and record the date/source.
-- [ ] Keep `README.md` test count updated whenever tests are added.
+- [x] Shell-quote every reproduction command via `webdoctor.shell.quote()`; added quoting regression tests.
+- [x] Renamed “consensus” language in code/tests to “side-by-side comparison”.
+- [x] Fixed all stale docs listed in section 10.
+- [x] Regenerated `pipeline.png` after fixing `pipeline.mmd` (Mermaid CLI v12.2.0).
+- [ ] Re-verify model catalog against provider docs and record a fresh date/source (`ai_adapters.py` carries a 2026-11-24 note).
+- [x] Keep `README.md` test count updated whenever tests are added (now 100).
 
 ### P2 — robustness and test coverage
 
-- [ ] Verify monkey submit guard actually installs before navigation-dependent submits; add a focused test.
-- [ ] Add authenticated monkey test and pasted `session_json` → file → browser reuse test.
-- [ ] Add JS unit/static checks for export button states and error paths; keep `node --check` in gates.
-- [ ] Make PDF determinism wording precise: WeasyPrint path only; Chromium is platform-dependent.
-- [ ] Add CLI dispatch/version-bump tests; `test_dashboard.py` currently hardcodes `v1.0.0`.
+- [x] Verified monkey submit guard installs before navigation (fixed an arrow-function string that Playwright never invoked); added a focused load-time submit test.
+- [x] Added authenticated monkey test and pasted `session_json` → file → browser reuse test.
+- [x] Added JS static checks for export button states and error paths; `node --check` remains in gates.
+- [x] Made PDF determinism wording precise: WeasyPrint path only; Chromium output is platform-dependent.
+- [x] Added CLI dispatch/version tests; dashboard test now uses `TOOL_VERSION` instead of a hardcoded `v1.0.0`.
 - [ ] Refresh local `main` from `origin/main` before starting new work.
 
 ## 12. Update protocol

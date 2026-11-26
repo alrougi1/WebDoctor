@@ -32,6 +32,7 @@ from webdoctor.checks.monkey import run_monkey_check
 from webdoctor.checks.auth import perform_form_login, run_auth_audit_check
 from webdoctor.diagnostics.ai_engine import generate_ai_diagnosis
 from webdoctor.diagnostics.rule_engine import generate_rule_summary
+from webdoctor.shell import quote
 
 try:
     import urllib3
@@ -287,7 +288,7 @@ def run_diagnostics(
                     "The HTTP client could not download the page body (network error, timeout, "
                     "or server disconnect), even though the initial request succeeded."
                 ),
-                reproduction=f"curl -sS '{url}' -o /dev/null -w '%{{http_code}}\\n'",
+                reproduction=f"curl -sS {quote(url)} -o /dev/null -w '%{{http_code}}\\n'",
                 fix="Check network connectivity, server stability, and any bot protection that may reset HTML requests.",
             )],
         ))

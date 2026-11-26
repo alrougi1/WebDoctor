@@ -1,5 +1,5 @@
 """Multi-AI root-cause diagnosis engine for WebDoctor. Supports OpenAI (Sandbox built-in),
-Gemini, Claude, and custom providers, plus multi-model consensus comparison."""
+Gemini, Claude, and custom providers, plus multi-model side-by-side comparison."""
 from __future__ import annotations
 
 import json
@@ -54,7 +54,7 @@ def generate_ai_diagnosis(
     api_base: Optional[str] = None,
     compare: Optional[List[Dict[str, str]]] = None,
 ) -> str:
-    """Generate AI diagnosis. `compare` runs multiple models and produces a consensus report."""
+    """Generate AI diagnosis. `compare` runs multiple models side by side."""
     provider = (provider or "sandbox").strip().lower()
     model = model or default_model_for_provider(provider)
 
@@ -81,7 +81,7 @@ def generate_ai_diagnosis(
 
 
 def _multi_model_diagnosis(prompt: str, models: List[Dict[str, str]]) -> str:
-    """Query 2-4 models sequentially (avoid sandbox proxy concurrency issues) and stitch consensus."""
+    """Query 2-4 models sequentially (avoid sandbox proxy concurrency issues) and stitch a side-by-side report."""
     results: Dict[str, str] = {}
     for m in models:
         label = m.get("label") or m.get("model", "AI")
@@ -104,7 +104,7 @@ def _multi_model_diagnosis(prompt: str, models: List[Dict[str, str]]) -> str:
         except Exception as e:
             results[label] = f"*Model call failed: {e}*"
 
-    out = ["# Multi-AI Consensus Diagnosis\n",
+    out = ["# Multi-AI Side-by-Side Diagnosis\n",
            f"> WebDoctor queried **{len(results)} AI models** for this diagnosis. "
            "Where all models agree, act with highest priority; where they differ, "
            "verify with the reproduction commands provided.\n"]

@@ -215,6 +215,30 @@ def test_runner_passes_prior_browser_result_to_monkey(monkeypatch):
     assert report.metrics["monkey_actions_executed"] == 7
 
 
+def test_runner_passes_session_to_authenticated_monkey(monkeypatch, tmp_path):
+    _patch_suites(monkeypatch)
+    monkeypatch.setattr(
+        runner, "run_browser_check",
+        lambda *a, **k: CheckResult(name="Browser", category="browser", status=CheckStatus.PASSED),
+    )
+    captured = {}
+
+    def _fake_monkey(url, **kwargs):
+        captured.update(kwargs)
+        return CheckResult(
+            name="Hard Monkey Test", category="monkey", status=CheckStatus.PASSED,
+            metrics={"actions_executed": 0, "planned_actions": 0, "trace": []},
+        )
+
+    monkeypatch.setattr(runner, "run_monkey_check", _fake_monkey)
+    session = str(tmp_path / "storage_state.json")
+    runner.run_diagnostics(
+        BASE, browser_mode=True, check_links=False, ai=False, monkey=True,
+        session_path=session,
+    )
+    assert captured["session_path"] == session
+
+
 def test_dashboard_monkey_request_is_sanitized_and_validated():
     request = server_app.DiagnoseRequest(
         url=BASE, monkey=True, monkey_seed=9, monkey_actions=30, monkey_delay_ms=5,
@@ -294,3 +318,49 @@ def test_real_browser_monkey_run_is_bounded_and_captures_errors():
     assert not any(i.severity == Severity.CRITICAL for i in result.issues)
     # The destructive link must never enter the action plan.
     assert all("logout" not in json.dumps(step).lower() for step in metrics["trace"])
+
+
+def test_submit_guard_is_active_during_initial_page_load():
+    posts = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            body = (b"<!doctype html><html lang='en'><body>"
+                    b"<form id='f' method='post' action='/submit'>"
+                    b"<input id='q' type='text' aria-label='Query'></form>"
+                    b"<script>document.getElementById('f').submit();</script>"
+                    b"</body></html>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            posts.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    class Server(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    httpd = Server(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    target = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        result = run_monkey_check(
+            target, seed=3, actions=6, delay_ms=10, allow_navigation=False
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+    assert result.metrics["blocked_submit_count"] >= 1
+    assert posts == [], posts
+    assert any("Submission Blocked" in i.title for i in result.issues)

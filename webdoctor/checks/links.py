@@ -1,7 +1,6 @@
 """Broken link & resource checker: crawls <a> and <img> references concurrently."""
 from __future__ import annotations
 
-import shlex
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -15,6 +14,7 @@ from webdoctor.config import (
     MAX_LINKS_TO_CHECK,
     LINK_CHECK_CONCURRENCY,
 )
+from webdoctor.shell import quote
 
 
 def _collect_references(html: str, base_url: str) -> Tuple[List[Dict[str, str]], int]:
@@ -128,7 +128,7 @@ def run_links_check(url: str, html: str, verify: bool = True) -> CheckResult:
             summary=f"The link{link_text} on this page returns {f'HTTP {status}' if status else err}.",
             detail=f"Source tag: <{ref_kind}> | Link text: '{r.get('text','')}'\nTarget: {r['url']}\nResult: status={status}, error={err}",
             how_it_happened=_explain_link_failure(status, err, r["url"]),
-            reproduction=f"curl -sI -o /dev/null -w 'HTTP %{{http_code}}\\n' {shlex.quote(r['url'])}",
+            reproduction=f"curl -sI -o /dev/null -w 'HTTP %{{http_code}}\\n' {quote(r['url'])}",
             fix=_fix_link(status, r["url"], ref_kind),
         ))
 

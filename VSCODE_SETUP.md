@@ -61,7 +61,7 @@ Then open `http://127.0.0.1:8080` in your browser. Stop the server with `Ctrl+C`
 
 ## AI diagnosis
 
-The Manus built-in AI provider is available only inside Manus-managed environments. For a local VS Code installation, either use `--no-ai` (rule-based explanations; no API key needed) or configure a direct AI provider with your own API key. Never put API keys in source code or commit them to Git.
+The Sandbox provider (OpenAI-compatible proxy) is available only inside managed environments. For a local VS Code installation, either use `--no-ai` (rule-based explanations; no API key needed) or configure a direct AI provider with your own API key. Never put API keys in source code or commit them to Git.
 
 ## Run WebDoctor's own tests
 

@@ -152,14 +152,14 @@ class TestMultiAI(unittest.TestCase):
         self.assertEqual(len(res), 2)
         self.assertEqual(res[0]["provider"], "sandbox")
 
-    def test_consensus_merging(self):
+    def test_side_by_side_merging(self):
         prompt = "test prompt"
         models = [
             {"provider": "sandbox", "model": "gpt-6-luna", "label": "Model A"},
             {"provider": "anthropic", "model": "claude-sonnet-5-5", "label": "Model B", "api_key": ""},
         ]
         out = _multi_model_diagnosis(prompt, models)
-        self.assertIn("Consensus", out)
+        self.assertIn("Side-by-Side", out)
         self.assertIn("Model A", out)
         self.assertIn("Model B", out)
 

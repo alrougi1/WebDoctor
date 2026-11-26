@@ -10,6 +10,7 @@ from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
 from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_USER_AGENT, MAX_PAGE_WAIT_MS
+from webdoctor.shell import quote
 
 SURVEY_TRACKER_SIGNATURES = [
     ("Hotjar (user feedback & surveys)", "hotjar.com"),
@@ -299,7 +300,7 @@ def run_browser_check(
             summary=f"The browser could not load a {rtype} resource: {rurl[:100]}",
             detail=f"Resource type: {rtype}\nURL: {rurl}\nStatus: {status} ({fr.get('status_text','')})",
             how_it_happened=_explain_resource_failure(status, rurl),
-            reproduction=f"curl -sI '{rurl}'",
+            reproduction=f"curl -sI {quote(rurl)}",
             fix=_fix_resource_failure(status, rtype),
         ))
 
@@ -315,7 +316,7 @@ def run_browser_check(
             summary=f"A single {r['type']} asset exceeds 1 MB and slows initial render on mobile.",
             detail=f"URL: {r['url']}\nSize: {r['size']:,} bytes\nType: {r['type']}",
             how_it_happened="Unoptimized images, unminified bundles, or embedded video files push payload sizes beyond recommended budgets, directly degrading First Contentful Paint and Largest Contentful Paint.",
-            reproduction=f"curl -s '{r['url']}' -o /tmp/asset && ls -lh /tmp/asset",
+            reproduction=f"curl -s {quote(r['url'])} -o /tmp/asset && ls -lh /tmp/asset",
             fix="Compress and convert images to WebP/AVIF, lazy-load below-the-fold media, split JavaScript bundles, and serve pre-compressed assets via CDN.",
         ))
 

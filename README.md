@@ -10,7 +10,7 @@
 
 | Suite | Detects |
 |---|---|
-| **HTTP & SSL** | 4xx/5xx codes, response time, TTFB, redirect chains, SSL validation, gzip/brotli compression |
+| **HTTP & SSL** | 4xx/5xx codes, total response time, redirect chains, SSL validation, gzip/brotli compression (browser suite reports TTFB separately) |
 | **Security headers** | HSTS, CSP, X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy, insecure cookies |
 | **SEO & accessibility** | Title/description, viewport, `lang`, missing `alt` on images, headings, favicon, form input labels |
 | **Broken link crawler** | Concurrently checks up to 40 unique `<a>`/`<img>`/resource URLs for 404s/5xxs/timeouts/SSL errors (truncation is reported in metrics) |
@@ -24,7 +24,7 @@
 
 ## 1. Multi-AI diagnosis (ChatGPT, Gemini, Claude, and more)
 
-Choose your AI provider per run — or **compare multiple models side by side** in one report (each model's diagnosis is shown separately for you to reconcile):
+Choose your AI provider per run — or **compare multiple models side by side** in one report (each model's diagnosis is shown side by side for you to reconcile):
 
 | Provider | Models (verified IDs) | Setup |
 |---|---|---|
@@ -182,14 +182,14 @@ it or submitting credentials.
 
 ## Reports
 
-Every run can emit four reports (saved to `--report-dir`, default `./reports`):
+Every run can emit four report formats (saved to `--report-dir`, default `./reports`). The final table row is a session artifact written only for authenticated runs, not a report:
 
 | File | Purpose |
 |---|---|
 | `report.html` | Self-contained interactive report with embedded screenshots |
 | `report.md` | One-page markdown — PR comments, CI summaries, Slack bots |
 | `report.json` | Machine-readable results for dashboards and Datadog |
-| `report.pdf` | Clean shareable PDF for stakeholders (WeasyPrint first, headless Chromium fallback; skipped with a warning only if neither renderer can produce a file) |
+| `report.pdf` | Clean shareable PDF for stakeholders (WeasyPrint first, headless Chromium fallback; skipped with a warning only if neither renderer can produce a file). Byte-identical output is guaranteed only for the WeasyPrint path; Chromium output is platform-dependent. |
 | `storage_state.json` | Saved login session for authenticated runs (reusable; keep private) |
 
 **Important:** Reports and session files can contain private URLs, screenshots, and reusable authentication cookies. Never publish or share them. The repository ignores generated `reports/` by default; use a test account and protect session files like passwords.
@@ -242,7 +242,7 @@ webdoctor/
 │   ├── runner.py           # Suite orchestrator (anonymous + authenticated)
 │   ├── cli.py              # CLI with rich terminal output
 │   ├── checks/
-│   │   ├── http_check.py   # HTTP status, TTFB, SSL, redirects, compression
+│   │   ├── http_check.py   # HTTP status, total response time, SSL, redirects, compression
 │   │   ├── security.py     # Security headers & cookie flags
 │   │   ├── browser.py      # Playwright: JS errors, console, perf, screenshots, popup dismisser
 │   │   ├── monkey.py       # Seeded hard monkey/chaos engine, safety guards, action trace
@@ -258,7 +258,7 @@ webdoctor/
 ├── tests/                  # 22-test legacy suite + focused pytest suites
 │   └── test_all.py         # Unit & integration suite (also collected by pytest)
 ├── examples/               # GitHub Actions, pytest, Python SDK
-└── reports/                # Generated reports & screenshots
+└── reports/                # Generated, gitignored output; not part of the repo
 ```
 
 ---
@@ -270,7 +270,7 @@ pytest -q                    # all suites (legacy + focused regression tests)
 python tests/test_all.py     # legacy suite only
 ```
 
-The current full suite is 92 tests (22 legacy + 70 focused regression tests, including 12 monkey-suite tests).
+The current full suite is 100 tests (22 legacy + 78 focused regression tests, including 15 monkey-suite tests).
 
 ---
 

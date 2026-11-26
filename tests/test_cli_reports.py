@@ -1,5 +1,7 @@
-"""CLI report-write resilience tests."""
+"""CLI report-write resilience and dispatch tests."""
 import json
+
+import pytest
 
 from webdoctor.cli import build_parser, cmd_check
 from webdoctor.models import TestReport
@@ -42,6 +44,41 @@ def test_pdf_failure_does_not_stop_other_formats(tmp_path, monkeypatch, capsys):
     assert (reports / "report.json").exists()
     assert not (reports / "report.pdf").exists()
     assert "PDF generation skipped" in capsys.readouterr().err
+
+
+def test_version_flag_uses_package_version(capsys):
+    from webdoctor.config import TOOL_VERSION
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    assert TOOL_VERSION in capsys.readouterr().out
+
+
+def test_main_dispatches_every_subcommand(monkeypatch):
+    from webdoctor import cli
+
+    dispatched = []
+
+    def fake(name):
+        def _run(_args):
+            dispatched.append(name)
+            return 0
+        return _run
+
+    for name in ("cmd_check", "cmd_serve", "cmd_demo", "cmd_models", "cmd_login"):
+        monkeypatch.setattr(cli, name, fake(name))
+
+    argv = [
+        ["check", "https://example.com", "--no-ai"],
+        ["serve"],
+        ["demo", "--no-ai"],
+        ["models"],
+        ["login", "https://example.com"],
+    ]
+    for args in argv:
+        assert cli.main(args) == 0
+    assert dispatched == ["cmd_check", "cmd_serve", "cmd_demo", "cmd_models", "cmd_login"]
 
 
 def test_demo_uses_os_assigned_loopback_port(tmp_path, monkeypatch):

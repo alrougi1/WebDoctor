@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import shlex
 import time
 import requests
 from urllib.parse import urlparse
@@ -10,6 +9,7 @@ from typing import Optional, List
 
 from webdoctor.models import CheckResult, CheckStatus, Issue, Severity
 from webdoctor.config import DEFAULT_TIMEOUT, DEFAULT_USER_AGENT
+from webdoctor.shell import quote
 
 
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -56,7 +56,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary=f"The site's SSL certificate could not be validated: {e}",
             detail=str(e),
             how_it_happened="The browser or HTTP client refused the HTTPS connection because the certificate is expired, self-signed, invalid for this domain, or issued by an untrusted Certificate Authority. As a result, users will see a prominent browser security warning and modern browsers may block access entirely.",
-            reproduction=f"curl -Iv '{url}'",
+            reproduction=f"curl -Iv {quote(url)}",
             fix="Renew the certificate or issue a new valid certificate (e.g., via Let's Encrypt / certbot). Ensure the certificate's Common Name (CN) and Subject Alternative Names (SAN) match the exact hostname, including both www and non-www variants if both are used.",
         ))
         return CheckResult(name="HTTP & Network Health", category="http", status=CheckStatus.FAILED,
@@ -71,7 +71,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary=f"Could not connect to {url}: {e}",
             detail=str(e),
             how_it_happened="The connection failed at the TCP/DNS level. Common causes: the DNS domain does not resolve, the server port is closed/unreachable, the web server (nginx/apache/caddy) is not running, or a firewall/security group is dropping traffic.",
-            reproduction=f"curl -Iv '{url}'",
+            reproduction=f"curl -Iv {quote(url)}",
             fix="Verify DNS records point to the correct IP (`dig +short hostname`), confirm the web server is running (`systemctl status nginx`), and check firewall / security-group inbound rules for ports 80 and 443.",
         ))
         return CheckResult(name="HTTP & Network Health", category="http", status=CheckStatus.FAILED,
@@ -86,7 +86,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary=f"The server took longer than {timeout} seconds to respond.",
             detail=str(e),
             how_it_happened="The HTTP client sent the request but received no response headers within the allowed time window. This usually indicates the application server is overwhelmed, deadlocked on a database query, or stuck waiting for a downstream service.",
-            reproduction=f"curl -m {timeout} -w '\\nTime: %{{time_total}}s\\n' -o /dev/null -s '{url}'",
+            reproduction=f"curl -m {timeout} -w '\\nTime: %{{time_total}}s\\n' -o /dev/null -s {quote(url)}",
             fix="Profile slow server-side endpoints, optimize database queries, add server-side caching (Redis, CDN), and configure proper application timeouts.",
         ))
         return CheckResult(name="HTTP & Network Health", category="http", status=CheckStatus.FAILED,
@@ -101,7 +101,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary="The URL repeatedly redirects without reaching a final destination.",
             detail=str(e),
             how_it_happened="The client followed successive HTTP 3xx responses until the limit was exceeded. This typically happens when http->https and https->http rules conflict, or when authentication redirects bounce back and forth.",
-            reproduction=f"curl -sIL '{url}' | grep -iE 'HTTP/|location:'",
+            reproduction=f"curl -sIL {quote(url)} | grep -iE 'HTTP/|location:'",
             fix="Inspect redirect rules in your reverse proxy (nginx/cloudflare) and application middleware. Remove conflicting rules so the URL resolves to exactly one canonical destination in 1–2 hops.",
         ))
         return CheckResult(name="HTTP & Network Health", category="http", status=CheckStatus.FAILED,
@@ -138,7 +138,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary=f"The server returned an internal error response (HTTP {status_code}).",
             detail=f"Status: {status_code} ({resp.reason}). Final URL: {resp.url}.",
             how_it_happened=_explain_5xx(status_code),
-            reproduction=f"curl -i {shlex.quote(url)}",
+            reproduction=f"curl -i {quote(url)}",
             fix=_fix_5xx(status_code),
             evidence=(_redact(resp.text) if "text/html" in resp.headers.get("Content-Type", "") else None),
         ))
@@ -154,7 +154,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary=f"The URL returned an error response (HTTP {status_code}).",
             detail=f"Status: {status_code} ({resp.reason}). Final URL: {resp.url}.",
             how_it_happened=_explain_4xx(status_code),
-            reproduction=f"curl -i {shlex.quote(url)}",
+            reproduction=f"curl -i {quote(url)}",
             fix=_fix_4xx(status_code),
         ))
 
@@ -168,7 +168,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary=f"The full HTTP response took {response_time_ms} ms to download.",
             detail=f"Total response time: {response_time_ms} ms. Use the browser waterfall TTFB value for first-byte timing.",
             how_it_happened="This measures the complete request, including server think time and body transfer. It is not TTFB; the browser suite reports TTFB separately from the Navigation Timing API.",
-            reproduction=f"curl -w 'TTFB: %{{time_starttransfer}}s | Total: %{{time_total}}s\\n' -o /dev/null -s {shlex.quote(url)}",
+            reproduction=f"curl -w 'TTFB: %{{time_starttransfer}}s | Total: %{{time_total}}s\\n' -o /dev/null -s {quote(url)}",
             fix="Enable server-side page caching or a CDN (Cloudflare, Fastly), optimize database queries and ORM calls, implement gzip/brotli compression, and reduce payload size.",
         ))
 
@@ -183,7 +183,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary="The URL passes through more than 3 redirect hops before the final page.",
             detail=f"Chain: {chain}",
             how_it_happened="Each HTTP redirect forces the client to negotiate a new connection and request cycle, compounding latency. Chained redirects are usually left behind after site migrations or inconsistent internal linking.",
-            reproduction=f"curl -sIL '{url}' | grep -iE 'HTTP/|location:'",
+            reproduction=f"curl -sIL {quote(url)} | grep -iE 'HTTP/|location:'",
             fix="Consolidate redirects into a single direct rule (A -> C instead of A -> B -> C) and update internal links to point directly to the final canonical URL.",
         ))
 
@@ -199,7 +199,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary="The response body was served without Content-Encoding compression.",
             detail=f"Content-Type: {ct}, Content-Encoding: {ce or 'none'}, body size: {len(resp.content)} bytes.",
             how_it_happened="The origin web server did not apply gzip or Brotli compression to compressible text content, causing unnecessarily large wire transfer sizes and slower load times on mobile connections.",
-            reproduction=f"curl -sI -H 'Accept-Encoding: gzip, br' '{url}' | grep -i content-encoding",
+            reproduction=f"curl -sI -H 'Accept-Encoding: gzip, br' {quote(url)} | grep -i content-encoding",
             fix="Enable gzip/brotli in your web server. In nginx: `gzip on; gzip_types text/plain text/css application/json application/javascript text/xml;` — or let your CDN handle compression at the edge.",
         ))
 
@@ -214,7 +214,7 @@ def run_http_check(url: str, timeout: int = DEFAULT_TIMEOUT, verify: bool = True
             summary="HTTP/2 or HTTP/3 multiplexing is not enabled on this connection.",
             detail=f"Protocol detected: HTTP/{proto/10 if proto >= 10 else proto}.",
             how_it_happened="HTTP/1.1 requires a separate TCP connection per resource, which increases latency from head-of-line blocking compared to the single multiplexed connection of HTTP/2.",
-            reproduction=f"curl -sI --http2 '{url}' | head -5",
+            reproduction=f"curl -sI --http2 {quote(url)} | head -5",
             fix="Enable HTTP/2 in your web server config (e.g., `listen 443 ssl http2;` in nginx) or terminate traffic at a modern CDN that supports HTTP/2 and HTTP/3.",
         ))
 

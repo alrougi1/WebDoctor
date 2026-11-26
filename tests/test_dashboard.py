@@ -1,9 +1,14 @@
 """Dashboard rendering, static assets, and job lifecycle tests."""
+import json
+import os
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from webdoctor import server
+from webdoctor.config import TOOL_VERSION
+from webdoctor.models import TestReport
 from webdoctor.server import app as server_app
 
 
@@ -20,7 +25,7 @@ def client(monkeypatch):
 def test_dashboard_renders_and_static_assets_load(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert "v1.0.0" in response.text
+    assert f"v{TOOL_VERSION}" in response.text
     assert "__VER__" not in response.text
     assert "/static/dashboard.css" in response.text
     assert "/static/dashboard.js" in response.text
@@ -124,6 +129,31 @@ def test_background_run_tolerates_pruned_job(monkeypatch):
     server_app._background_run("pruned", request)
 
 
+def test_pasted_session_json_is_written_and_reused_by_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.setattr(server_app, "jobs", {})
+    monkeypatch.setattr(server_app, "REPORT_DIR", str(tmp_path))
+    captured = {}
+
+    def fake_run_diagnostics(url, **kwargs):
+        captured.update(kwargs)
+        return TestReport(url=url).compute_summary()
+
+    monkeypatch.setattr(server_app, "run_diagnostics", fake_run_diagnostics)
+    server_app.jobs["abc123def456"] = {"status": "queued", "created": 0.0}
+    state = '{"cookies": [{"name": "sid", "value": "abc"}], "origins": []}'
+    request = server_app.DiagnoseRequest(
+        url="https://example.com", browser=True, monkey=True, session_json=state,
+    )
+    server_app._background_run("abc123def456", request)
+
+    session_file = captured["session_path"]
+    assert session_file and os.path.exists(session_file)
+    with open(session_file, encoding="utf-8") as handle:
+        assert json.load(handle)["cookies"][0]["name"] == "sid"
+    assert captured["browser_mode"] is True
+    assert captured["monkey"] is True
+
+
 def test_login_test_validates_url(client):
     response = client.post("/api/login-test", json={
         "login_url": "file:///etc/passwd", "username": "u", "password": "p",
@@ -177,3 +207,13 @@ def test_token_is_injected_into_page_but_not_static_js(client):
     js = client.get("/static/dashboard.js").text
     assert server_app.DASHBOARD_TOKEN not in js
     assert "apiFetch" in js
+
+
+def test_export_button_error_paths_are_handled(client):
+    js = client.get("/static/dashboard.js").text
+    html = client.get("/").text
+    assert "Download failed:" in js
+    assert "btn.disabled=true" in js
+    assert "setExportMsg(" in js
+    assert "URL.revokeObjectURL" in js
+    assert 'id="exportmsg"' in html
