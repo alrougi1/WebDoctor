@@ -3,19 +3,21 @@ and run authenticated tests logged in as a real user."""
 from __future__ import annotations
 
 import asyncio
+import hmac
 import inspect
 import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -40,7 +42,55 @@ log = logging.getLogger(__name__)
 REPORT_DIR = os.path.abspath(os.environ.get("WEBDOCTOR_REPORTS", "./reports"))
 os.makedirs(REPORT_DIR, exist_ok=True)
 
+# The dashboard is a local-only tool. A per-process token is embedded in the
+# rendered page and required on every API call; a custom header cannot be sent
+# cross-origin without a CORS preflight, which this app never grants.
+DASHBOARD_TOKEN = secrets.token_urlsafe(24)
+TOKEN_HEADER = "X-WebDoctor-Token"
+_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_DASHBOARD_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+    "base-uri 'none'; frame-ancestors 'none'"
+)
+
+
+def _host_from_header(value: str) -> str:
+    """Extract a bare hostname from a Host header, including IPv6 literals."""
+    value = (value or "").strip()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end != -1 else value[1:]
+    return value.split(":", 1)[0]
+
+
+def require_dashboard_token(request: Request) -> None:
+    supplied = request.headers.get(TOKEN_HEADER, "")
+    if not hmac.compare_digest(supplied, DASHBOARD_TOKEN):
+        raise HTTPException(status_code=401, detail="Dashboard token missing or invalid")
+
+
 app = FastAPI(title="WebDoctor Dashboard", version=TOOL_VERSION)
+
+
+@app.middleware("http")
+async def _local_only_and_harden(request: Request, call_next):
+    # Reject DNS-rebinding attempts: an attacker domain pointing at 127.0.0.1
+    # still sends its own Host header, which is never loopback.
+    if _host_from_header(request.headers.get("host", "")) not in _ALLOWED_HOSTS:
+        return JSONResponse(
+            {"detail": "Dashboard is available only on loopback (127.0.0.1)."},
+            status_code=400,
+        )
+    response = await call_next(request)
+    # Downloaded reports have their own inline content; only the dashboard UI,
+    # static assets and JSON APIs receive the strict policy.
+    if not request.url.path.startswith("/api/reports/"):
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = _DASHBOARD_CSP
+    return response
+
 PACKAGE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
@@ -53,10 +103,13 @@ _TEMPLATE_RESPONSE_PARAMS = inspect.signature(templates.TemplateResponse).parame
 def _render_dashboard(request: Request):
     if "request" in _TEMPLATE_RESPONSE_PARAMS:
         return templates.TemplateResponse(
-            request, "dashboard.html", {"tool_version": TOOL_VERSION}
+            request,
+            "dashboard.html",
+            {"tool_version": TOOL_VERSION, "dashboard_token": DASHBOARD_TOKEN},
         )
     return templates.TemplateResponse(
-        "dashboard.html", {"request": request, "tool_version": TOOL_VERSION}
+        "dashboard.html",
+        {"request": request, "tool_version": TOOL_VERSION, "dashboard_token": DASHBOARD_TOKEN},
     )
 
 
@@ -312,12 +365,12 @@ def _background_run(job_id: str, req: DiagnoseRequest):
         _update_job(job_id, status="failed", message=str(e))
 
 
-@app.get("/api/models")
+@app.get("/api/models", dependencies=[Depends(require_dashboard_token)])
 def api_models():
     return {"models": list_available_models()}
 
 
-@app.post("/api/diagnose")
+@app.post("/api/diagnose", dependencies=[Depends(require_dashboard_token)])
 async def api_diagnose(req: DiagnoseRequest):
     try:
         validate_target_url(req.url)
@@ -359,7 +412,7 @@ async def api_diagnose(req: DiagnoseRequest):
     return {"job_id": jid}
 
 
-@app.get("/api/progress/{job_id}")
+@app.get("/api/progress/{job_id}", dependencies=[Depends(require_dashboard_token)])
 def api_progress(job_id: str):
     j = _get_job(job_id)
     if not j:
@@ -375,7 +428,7 @@ def api_progress(job_id: str):
     }
 
 
-@app.post("/api/login-test")
+@app.post("/api/login-test", dependencies=[Depends(require_dashboard_token)])
 def api_login_test(req: LoginTestRequest):
     try:
         validate_target_url(req.login_url)
@@ -397,7 +450,7 @@ def api_login_test(req: LoginTestRequest):
     return {"ok": False, "error": res.get("error", "Login failed")}
 
 
-@app.get("/api/reports/{job_id}/{fmt}")
+@app.get("/api/reports/{job_id}/{fmt}", dependencies=[Depends(require_dashboard_token)])
 def api_report_file(job_id: str, fmt: str):
     mapping = {"html": ("report.html", "text/html"), "md": ("report.md", "text/markdown"),
                "json": ("report.json", "application/json"), "pdf": ("report.pdf", "application/pdf")}

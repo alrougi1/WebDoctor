@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import tempfile
 import time
 from typing import Callable, Optional, List, Dict, Any
@@ -68,6 +69,26 @@ _METADATA_HOSTNAMES = {
 }
 
 
+def _resolved_addresses(host: str):
+    """Best-effort DNS resolution used to reject hostnames that point inward.
+
+    Resolution failure is not treated as a validation failure: an unresolvable
+    host cannot be scanned either, so failing open here cannot reach an SSRF
+    target. Callers still validate literal IPs before this step.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (OSError, ValueError):
+        return ()
+    addresses = set()
+    for info in infos:
+        try:
+            addresses.add(ipaddress.ip_address(info[4][0]))
+        except (ValueError, IndexError, TypeError):
+            continue
+    return addresses
+
+
 def validate_target_url(url: str, allow_private: bool = False) -> str:
     """Normalize and validate a target URL.
 
@@ -102,6 +123,18 @@ def validate_target_url(url: str, allow_private: bool = False) -> str:
 
     if not allow_private and host in _METADATA_HOSTNAMES:
         raise ValueError(f"Refusing to scan metadata hostname '{host}'.")
+
+    if not allow_private:
+        for resolved in _resolved_addresses(host):
+            if resolved.is_loopback:
+                continue  # Local demo/test targets are intentionally allowed.
+            if (resolved.is_private or resolved.is_link_local or resolved.is_reserved
+                    or resolved.is_multicast or resolved.is_unspecified):
+                raise ValueError(
+                    f"Refusing to scan '{host}': it resolves to private or "
+                    f"link-local address '{resolved}'. Use --allow-private only "
+                    "when you own and intentionally test it."
+                )
     return url
 
 

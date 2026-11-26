@@ -194,3 +194,35 @@ Each subsequent entry records: file(s), change and reason, exact verification co
 - Verification: local dashboard restarted on `127.0.0.1:8765` with temp reports: centered header CSS/JS served, one completed job had `pdf_available=True`, and HTML/Markdown/JSON/PDF endpoints all returned HTTP 200 with 23,605 / 2,321 / 9,017 / 139,149 bytes. No generated reports were written inside the repository.
 - Verification: `python tests/test_all.py` — 22 tests OK; `python -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only Git LF→CRLF notices); `webdoctor models` — PASS; `ast.parse(..., feature_version=(3,9)/(3,10)/(3,11))` across 42 `.py` files — PASS.
 - Result: PASS. No commit or push was requested.
+
+## 2026-11-26 — Living Agent.md whole-project playbook
+
+- Files: `Agent.md`, `last changes`.
+- Changes: wrote the previously empty root `Agent.md` as a living whole-project plan with golden rules, project snapshot, architecture inventory, check suites, scoring/report details, definition of done, verification gates, completed milestones marked `[x]`, decision log, known inconsistencies, prioritized `[ ]` backlog, and an update protocol for future agents.
+- Reason: the user asked to use `Agent.md` as the living plan, mark every completed step done, detect every part of the project, and add future work that helps agents work harder and better.
+- Verification: `.venv\Scripts\python.exe -m pytest -q` — 82 passed in 62.16s; `git diff --check` — PASS; `git status --short` — only `?? Agent.md` (before cleanup); `Get-ChildItem -Recurse -Filter *.pdf` — no PDF files in repository.
+- Verification: generated `reports/` directory recreated by pytest importing the FastAPI app was removed; final `git status --short`, `git diff --check`, and PDF scan reviewed after the cleanup.
+- Verification: readback found a stray `ope` prefix on line 1 of `Agent.md`; it was corrected and a second readback confirmed line 1 is `# WebDoctor Agent Playbook & Whole-Project Plan`, 305 lines total, with 70 completed/planned checklist items and no remaining `ope` marker.
+- Result: PASS. `Agent.md` is intentionally uncommitted; no commit or push was requested for this change.
+
+## 2026-11-26 — Dashboard security hardening (P0)
+
+- Files: `webdoctor/server/app.py`, `webdoctor/server/templates/dashboard.html`, `webdoctor/server/static/dashboard.js`, `webdoctor/cli.py`, `webdoctor/runner.py`, `tests/test_dashboard.py`, `tests/test_security_hardening.py`, `tests/test_monkey.py`, `README.md`, `SECURITY.md`, `Agent.md`, `last changes`.
+- Change: added a per-process `DASHBOARD_TOKEN` required as `X-WebDoctor-Token` on every `/api/*` route (constant-time comparison); loopback-only `Host` middleware rejects DNS-rebinding requests; strict CSP, `nosniff` and `no-referrer` headers applied to UI/static/APIs; removed inline event handlers and moved token delivery to a meta tag read by `apiFetch()`. `validate_target_url()` now resolves hostnames and rejects those pointing at private/link-local addresses while keeping loopback allowed for local demos. Added an authorization checklist and full-tree secret-scan guidance to `SECURITY.md`; updated test counts to 91.
+- Reason: the user requested a secure local dashboard with no risk; the previous dashboard exposed unauthenticated job submission/progress/report APIs and trusted hostnames without DNS validation.
+- Verification: `.venv\Scripts\python.exe -m pytest -q` — 91 passed; `.venv\Scripts\python.exe tests\test_all.py` — 22 tests OK.
+- Verification: `.venv\Scripts\python.exe -m compileall -q webdoctor tests examples` — PASS; `git diff --check` — PASS (only Git LF→CRLF notices); `node --check webdoctor\server\static\dashboard.js` — PASS; `ast.parse(..., feature_version=(3,9)/(3,10)/(3,11))` across 42 `.py` files — PASS.
+- Verification: `.venv\Scripts\webdoctor.exe models` — PASS (catalog printed; noted `sandbox:gpt-6-sol` missing from README as a new doc item); `.venv\Scripts\webdoctor.exe check https://example.com --no-ai --no-browser --no-links --ci` — grade A (92/100), PASSED.
+- Verification: live loopback smoke on an OS-assigned port with sentinel password/API key/session JSON — token meta embedded, `/api/models` 401 without/invalid token and 200 with token, hostile `Host` 400, sentinel values absent from progress, HTML/MD/JSON exports require token and return bytes — PASS.
+- Verification: real headless Chromium load of the hardened dashboard — token meta matches server token, every `/api/*` request carries the token, model catalog loads, and no CSP or console errors — PASS.
+- Verification: `git status --short` reviewed; generated `reports/` artifacts from the test run removed; no PDF files or session artifacts in the repository.
+- Result: PASS. No commit or push was requested for this change.
+
+## 2026-11-26 — Full feature validation and demo port fix
+
+- Files: `webdoctor/cli.py`, `tests/test_cli_reports.py`, `README.md`, `Agent.md`, `last changes`.
+- Change: `webdoctor demo` now binds an OS-assigned loopback port by default instead of fixed 8765 (which raised `PermissionError: WinError 10013` on this Windows machine); the server is always closed with `server_close()` in a `finally` block. Added a regression test for the OS-assigned port. Added the missing `gpt-6-sol` sandbox model to the README table.
+- Reason: the user asked for a full feature check; the demo command crashed before running any diagnosis when its fixed port was unavailable.
+- Verification: full local feature harness (temporary loopback fixture site, no third-party scans) — `check` on broken site with browser/links/monkey/PDF exits 1 and writes four non-empty reports with a valid `%PDF` header; `check` on healthy site exits 0; authenticated `check --login` completes; `demo` with monkey/PDF exits 1 and writes four reports; `--version`, `models`, custom `--out-*`, `--session` reuse, `--ai-compare` fallback, and SDK `run_diagnostics` all PASS.
+- Verification: `.venv\Scripts\python.exe -m pytest -q` — 92 passed; `.venv\Scripts\python.exe tests\test_all.py` — 22 tests OK; compileall, `git diff --check`, `node --check` and the 3.9/3.10/3.11 AST sweep — PASS.
+- Result: PASS. The user explicitly requested a commit and push after verification.

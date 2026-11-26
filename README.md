@@ -28,7 +28,7 @@ Choose your AI provider per run — or **compare multiple models side by side** 
 
 | Provider | Models (verified IDs) | Setup |
 |---|---|---|
-| **Sandbox (OpenAI-compatible proxy)** | `gpt-6-luna`, `gpt-6.1-sol`, `gemini-3.8-flash` | Only in managed environments; otherwise falls back automatically |
+| **Sandbox (OpenAI-compatible proxy)** | `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol`, `gemini-3.8-flash` | Only in managed environments; otherwise falls back automatically |
 | **OpenAI direct** | `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, `gpt-5.5` | Set `OPENAI_API_KEY` or `--ai-key` |
 | **Anthropic Claude** | `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2` | Set `ANTHROPIC_API_KEY` or `--ai-key` |
 | **Google Gemini direct** | `gemini-4-carbon`, `gemini-4-neon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.8-flash` | Set `GEMINI_API_KEY` or `--ai-key` |
@@ -166,6 +166,11 @@ webdoctor demo --pdf
 webdoctor serve --port 8080
 ```
 
+The dashboard is local-only by design: it generates a per-process token embedded in the
+page and requires it on every API call, rejects non-loopback `Host` headers (DNS rebinding),
+and serves a strict Content-Security-Policy. See [SECURITY.md](SECURITY.md) before exposing
+it or submitting credentials.
+
 ---
 
 ## Dashboard screenshots
@@ -265,7 +270,7 @@ pytest -q                    # all suites (legacy + focused regression tests)
 python tests/test_all.py     # legacy suite only
 ```
 
-The current full suite is 82 tests (22 legacy + 60 focused regression tests, including 12 monkey-suite tests).
+The current full suite is 92 tests (22 legacy + 70 focused regression tests, including 12 monkey-suite tests).
 
 ---
 

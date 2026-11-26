@@ -42,3 +42,24 @@ def test_pdf_failure_does_not_stop_other_formats(tmp_path, monkeypatch, capsys):
     assert (reports / "report.json").exists()
     assert not (reports / "report.pdf").exists()
     assert "PDF generation skipped" in capsys.readouterr().err
+
+
+def test_demo_uses_os_assigned_loopback_port(tmp_path, monkeypatch):
+    from webdoctor import cli
+
+    args = cli.build_parser().parse_args([
+        "demo", "--no-ai", "--report-dir", str(tmp_path / "reports"),
+    ])
+    assert args.demo_port == 0
+
+    seen = {}
+
+    def fake_cmd_check(check_args):
+        seen["url"] = check_args.url
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_check", fake_cmd_check)
+    assert cli.cmd_demo(args) == 0
+    url = seen["url"]
+    assert url.startswith("http://127.0.0.1:")
+    assert int(url.rsplit(":", 1)[1]) > 0

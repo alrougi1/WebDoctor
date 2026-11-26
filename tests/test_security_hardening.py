@@ -10,6 +10,9 @@ from webdoctor.models import TestReport, Issue, Severity, CheckResult, CheckStat
 from webdoctor.reporters.html_report import generate_html
 from webdoctor.runner import validate_target_url
 
+AUTH = {"X-WebDoctor-Token": server.DASHBOARD_TOKEN}
+LOOPBACK_URL = "http://127.0.0.1"
+
 
 def test_validate_target_url_blocks_ssrf_targets():
     assert validate_target_url("example.com") == "https://example.com"
@@ -31,7 +34,7 @@ def test_progress_endpoint_never_returns_submitted_secrets(tmp_path, monkeypatch
         return TestReport(url="https://example.com").compute_summary()
 
     monkeypatch.setattr(server, "run_diagnostics", fake_run)
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url=LOOPBACK_URL)
     response = client.post("/api/diagnose", json={
         "url": "https://example.com",
         "pdf": False,
@@ -39,13 +42,13 @@ def test_progress_endpoint_never_returns_submitted_secrets(tmp_path, monkeypatch
         "ai_key": "KEY_SECRET",
         "session_json": '{"cookies":[{"name":"SESSION_SECRET"}]}',
         "ai_base": None,
-    })
+    }, headers=AUTH)
     assert response.status_code == 200
     job_id = response.json()["job_id"]
 
     progress = None
     for _ in range(100):
-        progress = client.get(f"/api/progress/{job_id}").json()
+        progress = client.get(f"/api/progress/{job_id}", headers=AUTH).json()
         if progress.get("status") in ("completed", "failed"):
             break
         time.sleep(0.02)
@@ -58,14 +61,14 @@ def test_progress_endpoint_never_returns_submitted_secrets(tmp_path, monkeypatch
 
 
 def test_diagnose_rejects_private_urls_and_custom_ai_base():
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url=LOOPBACK_URL)
     bad_url = client.post("/api/diagnose", json={
         "url": "http://169.254.169.254/latest/meta-data", "pdf": False,
-    })
+    }, headers=AUTH)
     assert bad_url.status_code == 400
     bad_base = client.post("/api/diagnose", json={
         "url": "https://example.com", "pdf": False, "ai_base": "http://internal.local/v1",
-    })
+    }, headers=AUTH)
     assert bad_base.status_code == 400
 
 
@@ -89,3 +92,21 @@ def test_html_report_sanitizes_ai_markdown_and_embedded_json():
     assert "</script><script>alert('repro')</script>" not in html
     assert "<\\/script><script>alert('repro')<\\/script>" in html
     assert "alert('repro')" in html  # text is preserved, not executable
+
+
+def test_validate_target_url_rejects_hostname_resolving_inward(monkeypatch):
+    import socket
+    import webdoctor.runner as runner
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr(runner.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError, match="resolves to private"):
+        validate_target_url("public-looking.example")
+    # A hostname that resolves to loopback is still allowed for local demos.
+    def loopback_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(runner.socket, "getaddrinfo", loopback_getaddrinfo)
+    assert validate_target_url("local-demo.example").endswith("local-demo.example")

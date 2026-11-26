@@ -1,4 +1,14 @@
 let MODEL_CAT = [];
+// The per-process token is injected as a meta tag (CSP-safe) and required on
+// every API call. A custom header cannot be forged from a cross-origin page.
+const DASHBOARD_TOKEN = (document.querySelector('meta[name="webdoctor-token"]') || {}).content || '';
+function apiFetch(path, options){
+  const opts = Object.assign({}, options || {});
+  const headers = Object.assign({}, opts.headers || {});
+  headers['X-WebDoctor-Token'] = DASHBOARD_TOKEN;
+  opts.headers = headers;
+  return fetch(path, opts);
+}
 // Defaults mirror webdoctor.config; the full list comes from /api/models so the
 // dashboard never advertises stale or retired model IDs.
 const DEFAULT_MODELS = {
@@ -8,7 +18,7 @@ const DEFAULT_MODELS = {
   gemini: "gemini-4-hydrogen",
 };
 async function loadModels(){
-  try{ const r=await fetch('/api/models'); const d=await r.json(); MODEL_CAT=d.models||[]; }catch(e){}
+  try{ const r=await apiFetch('/api/models'); const d=await r.json(); MODEL_CAT=d.models||[]; }catch(e){}
   onProvChange();
 }
 function onProvChange(){
@@ -22,6 +32,8 @@ function onProvChange(){
 }
 loadModels();
 clearExports();
+document.getElementById('ai_p').addEventListener('change', onProvChange);
+document.getElementById('test_login').addEventListener('click', testLogin);
 
 document.getElementById('f').addEventListener('submit', async e=>{
   e.preventDefault();
@@ -49,7 +61,7 @@ document.getElementById('f').addEventListener('submit', async e=>{
     monkey_delay_ms: parseInt(document.getElementById('monkey_delay').value,10)||0,
     monkey_navigation: document.getElementById('monkey_nav').checked,
   };
-  const res=await fetch('/api/diagnose',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  const res=await apiFetch('/api/diagnose',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   const {job_id}=await res.json();
   poll(job_id);
 });
@@ -57,7 +69,7 @@ document.getElementById('f').addEventListener('submit', async e=>{
 async function testLogin(){
   const msg=document.getElementById('login_msg'); msg.className='sub'; msg.textContent='Testing login...';
   try{
-    const r=await fetch('/api/login-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+    const r=await apiFetch('/api/login-test',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
       login_url:document.getElementById('login_url').value||document.getElementById('u').value,
       username:document.getElementById('login_u').value, password:document.getElementById('login_p').value,
     })});
@@ -70,7 +82,7 @@ async function testLogin(){
 async function poll(id){
   for(let i=0;i<180;i++){
     await new Promise(r=>setTimeout(r,1000));
-    const r=await fetch('/api/progress/'+id); const d=await r.json();
+    const r=await apiFetch('/api/progress/'+id); const d=await r.json();
     document.getElementById('pmsg').textContent=(d.message||'')+' ('+ (d.percent||0)+'%)';
     document.getElementById('pfill').style.width=(d.percent||0)+'%';
     if(d.status==='completed'){ render(id,d.report); break; }
@@ -114,7 +126,7 @@ async function downloadReport(id, fmt, btn){
   btn.disabled=true; btn.textContent='Downloading...';
   setExportMsg('Preparing '+fmt.toUpperCase()+' download...');
   try{
-    const r=await fetch('/api/reports/'+id+'/'+fmt, {cache:'no-store'});
+    const r=await apiFetch('/api/reports/'+id+'/'+fmt, {cache:'no-store'});
     if(!r.ok) throw new Error('server returned HTTP '+r.status);
     const blob=await r.blob();
     if(!blob.size) throw new Error('report file is empty');

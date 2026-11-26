@@ -7,10 +7,13 @@ from webdoctor import server
 from webdoctor.server import app as server_app
 
 
+AUTH = {"X-WebDoctor-Token": server_app.DASHBOARD_TOKEN}
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(server_app, "jobs", {})
-    with TestClient(server_app.app) as test_client:
+    with TestClient(server_app.app, base_url="http://127.0.0.1") as test_client:
         yield test_client
 
 
@@ -26,8 +29,8 @@ def test_dashboard_renders_and_static_assets_load(client):
     js = client.get("/static/dashboard.js")
     assert css.status_code == 200 and "body" in css.text
     assert js.status_code == 200 and "ai_base" not in js.text
-    assert client.get("/api/models").status_code == 200
-    assert client.get("/api/progress/unknown-job").status_code == 404
+    assert client.get("/api/models", headers=AUTH).status_code == 200
+    assert client.get("/api/progress/unknown-job", headers=AUTH).status_code == 404
 
 
 def test_progress_exposes_only_whitelisted_fields(client):
@@ -41,7 +44,7 @@ def test_progress_exposes_only_whitelisted_fields(client):
         "ai_key": "sk-secret",
         "session_json": '{"cookies": []}',
     }
-    data = client.get("/api/progress/abc123def456").json()
+    data = client.get("/api/progress/abc123def456", headers=AUTH).json()
     assert set(data) == {"status", "percent", "message", "created", "report"}
     assert "super-secret" not in str(data)
     assert "sk-secret" not in str(data)
@@ -49,16 +52,16 @@ def test_progress_exposes_only_whitelisted_fields(client):
 
 def test_diagnose_rejects_custom_ai_base_and_private_url(client):
     base = {"url": "https://example.com", "browser": False, "links": False, "ai": False}
-    response = client.post("/api/diagnose", json={**base, "ai_base": "http://evil.example"})
+    response = client.post("/api/diagnose", json={**base, "ai_base": "http://evil.example"}, headers=AUTH)
     assert response.status_code == 400
     assert "Custom AI base" in response.json()["detail"]
     # Loopback is intentionally allowed for local demos; other private ranges are not.
-    response = client.post("/api/diagnose", json={**base, "url": "http://10.0.0.5/admin"})
+    response = client.post("/api/diagnose", json={**base, "url": "http://10.0.0.5/admin"}, headers=AUTH)
     assert response.status_code == 400
 
 
 def test_report_file_rejects_invalid_job_id(client):
-    response = client.get("/api/reports/not-a-valid-job/html")
+    response = client.get("/api/reports/not-a-valid-job/html", headers=AUTH)
     assert response.status_code == 400
 
 
@@ -79,7 +82,7 @@ def test_report_file_serves_as_attachment(client, tmp_path, monkeypatch):
     job_dir = tmp_path / "abc123def456"
     job_dir.mkdir()
     (job_dir / "report.html").write_text("<h1>report</h1>", encoding="utf-8")
-    response = client.get("/api/reports/abc123def456/html")
+    response = client.get("/api/reports/abc123def456/html", headers=AUTH)
     assert response.status_code == 200
     disposition = response.headers["content-disposition"].lower()
     assert "attachment" in disposition
@@ -124,5 +127,53 @@ def test_background_run_tolerates_pruned_job(monkeypatch):
 def test_login_test_validates_url(client):
     response = client.post("/api/login-test", json={
         "login_url": "file:///etc/passwd", "username": "u", "password": "p",
-    })
+    }, headers=AUTH)
     assert response.status_code == 400
+
+
+def test_api_requires_local_dashboard_token(client):
+    assert client.get("/api/models").status_code == 401
+    bad = {"X-WebDoctor-Token": "not-the-token"}
+    assert client.get("/api/models", headers=bad).status_code == 401
+    assert client.post("/api/diagnose", json={"url": "https://example.com"}).status_code == 401
+    assert client.get("/api/progress/anything", headers=bad).status_code == 401
+    assert client.get("/api/reports/anything/html").status_code == 401
+    assert client.post("/api/login-test", json={
+        "login_url": "https://example.com", "username": "u", "password": "p",
+    }, headers=bad).status_code == 401
+
+
+@pytest.mark.parametrize("host", [
+    "evil.example",
+    "127.0.0.1.evil.example",
+    "localhost.evil.test",
+    "[::ffff:10.0.0.5]",
+])
+def test_non_loopback_host_is_rejected(client, host):
+    response = client.get("/", headers={"Host": host})
+    assert response.status_code == 400
+    assert "loopback" in response.json()["detail"]
+
+
+def test_loopback_host_with_port_is_allowed(client):
+    assert client.get("/", headers={"Host": "127.0.0.1:8765"}).status_code == 200
+
+
+def test_dashboard_sends_hardening_headers_and_no_inline_handlers(client):
+    response = client.get("/")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    csp = response.headers["content-security-policy"]
+    assert "script-src 'self'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "onclick=" not in response.text
+    assert "onchange=" not in response.text
+    assert 'meta name="webdoctor-token"' in response.text
+
+
+def test_token_is_injected_into_page_but_not_static_js(client):
+    response = client.get("/")
+    assert server_app.DASHBOARD_TOKEN in response.text
+    js = client.get("/static/dashboard.js").text
+    assert server_app.DASHBOARD_TOKEN not in js
+    assert "apiFetch" in js

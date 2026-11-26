@@ -266,12 +266,14 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
-    from webdoctor.server.app import app
+    from webdoctor.server.app import DASHBOARD_TOKEN, app
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("[warning] Binding to a non-loopback address exposes credentials submitted "
               "to this dashboard. Use 127.0.0.1 unless you have secured access.",
               file=sys.stderr)
     print(f"Starting WebDoctor dashboard at http://{args.host}:{args.port}")
+    print("[info] Local dashboard token (embedded in the page, needed only for direct API calls): "
+          f"{DASHBOARD_TOKEN}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 
@@ -340,10 +342,13 @@ def cmd_demo(args: argparse.Namespace) -> int:
     class ReuseTCPServer(socketserver.TCPServer):
         allow_reuse_address = True
 
+    # Port 0 lets the OS choose a free loopback port. Fixed ports can be
+    # reserved or permissions-blocked on Windows, which broke `webdoctor demo`.
     httpd = ReuseTCPServer(("127.0.0.1", args.demo_port), DemoHandler)
+    bound_port = httpd.server_address[1]
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
-    demo_url = f"http://127.0.0.1:{args.demo_port}"
+    demo_url = f"http://127.0.0.1:{bound_port}"
     print(f"Broken demo site running at {demo_url}\nRunning WebDoctor diagnostics against it...\n")
 
     # Build the check command through the real parser so new flags cannot break demo.
@@ -364,9 +369,11 @@ def cmd_demo(args: argparse.Namespace) -> int:
         if getattr(args, "monkey_no_navigation", False):
             check_argv.append("--monkey-no-navigation")
     check_args = build_parser().parse_args(check_argv)
-    code = cmd_check(check_args)
-    httpd.shutdown()
-    return code
+    try:
+        return cmd_check(check_args)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -432,7 +439,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8080)
 
     d = sub.add_parser("demo", help="Run diagnostics against a built-in broken demo site")
-    d.add_argument("--demo-port", type=int, default=8765)
+    d.add_argument("--demo-port", type=int, default=0,
+                   help="Loopback port for the demo site (0 = OS-assigned free port)")
     d.add_argument("--report-dir", default="./reports")
     d.add_argument("--no-ai", action="store_true")
     d.add_argument("--ai-provider", default="sandbox",

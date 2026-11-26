@@ -233,11 +233,11 @@ def test_dashboard_monkey_request_is_sanitized_and_validated():
 def test_dashboard_rejects_invalid_monkey_actions():
     from fastapi.testclient import TestClient
 
-    with TestClient(server_app.app) as client:
+    with TestClient(server_app.app, base_url="http://127.0.0.1") as client:
         response = client.post("/api/diagnose", json={
             "url": BASE, "browser": False, "links": False, "ai": False,
             "monkey": True, "monkey_actions": 0,
-        })
+        }, headers={"X-WebDoctor-Token": server_app.DASHBOARD_TOKEN})
     assert response.status_code == 400
     assert "monkey-actions" in response.json()["detail"]
 
